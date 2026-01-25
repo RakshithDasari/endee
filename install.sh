@@ -28,7 +28,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # dependencies list
 pkg_debian_ubuntu=(cmake clang-19 build-essential libssl-dev libcurl4-openssl-dev unzip curl git)
 pkg_redhat=(cmake openssl-devel libcurl-devel clang unzip curl git)
-pkg_macos=(cmake unzip curl git)
+pkg_macos=(cmake unzip curl git openssl@3)
 
 
 # ****************************************
