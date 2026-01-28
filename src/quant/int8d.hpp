@@ -16,7 +16,7 @@ namespace ndd {
                 return dimension * sizeof(int8_t) + sizeof(float);
             }
 
-            inline float extract_inv_scale(const uint8_t* buffer, size_t dimension) {
+            inline float extract_scale(const uint8_t* buffer, size_t dimension) {
                 return *reinterpret_cast<const float*>(buffer + dimension * sizeof(int8_t));
             }
 
@@ -36,19 +36,20 @@ namespace ndd {
                 if(abs_max == 0.0f) {
                     abs_max = 1.0f;  // Avoid division by zero
                 }
-                float scale = INT8_SCALE / abs_max;
+                float scale = abs_max / INT8_SCALE;
+                float inv_scale = 1.0f / scale;
 
                 // Quantize data
                 int8_t* data_ptr = reinterpret_cast<int8_t*>(buffer.data());
                 for(size_t i = 0; i < dimension; ++i) {
-                    float scaled = input[i] * scale;
+                    float scaled = input[i] * inv_scale;
                     data_ptr[i] = static_cast<int8_t>(std::round(scaled));
                 }
 
-                // Store INVERSE scale for dequantization (abs_max/FP8_SCALE)
+                // Store scale for dequantization
                 float* scale_ptr =
                         reinterpret_cast<float*>(buffer.data() + (dimension * sizeof(int8_t)));
-                *scale_ptr = abs_max / INT8_SCALE;
+                *scale_ptr = scale;
 
                 return buffer;
             }
@@ -69,11 +70,12 @@ namespace ndd {
                 if(abs_max == 0.0f) {
                     abs_max = 1.0f;
                 }
-                float scale = INT8_SCALE / abs_max;
+                float scale = abs_max / INT8_SCALE;
+                float inv_scale = 1.0f / scale;
 
                 // SIMD quantization - using more registers for better parallelism
                 int8_t* data_ptr = reinterpret_cast<int8_t*>(buffer.data());
-                const __m512 scale_vec = _mm512_set1_ps(scale);
+                const __m512 scale_vec = _mm512_set1_ps(inv_scale);
 
                 size_t i = 0;
                 size_t vec_size =
@@ -125,14 +127,14 @@ namespace ndd {
 
                 // Handle remaining elements
                 for(; i < dimension; ++i) {
-                    float scaled = input[i] * scale;
+                    float scaled = input[i] * inv_scale;
                     data_ptr[i] = static_cast<int8_t>(std::round(scaled));
                 }
 
-                // Store INVERSE scale for dequantization (abs_max/FP8_SCALE)
+                // Store scale for dequantization
                 float* scale_ptr =
                         reinterpret_cast<float*>(buffer.data() + (dimension * sizeof(int8_t)));
-                *scale_ptr = abs_max / INT8_SCALE;
+                *scale_ptr = scale;
 
                 return buffer;
             }
@@ -155,11 +157,12 @@ namespace ndd {
                 if(abs_max == 0.0f) {
                     abs_max = 1.0f;
                 }
-                float scale = INT8_SCALE / abs_max;
+                float scale = abs_max / INT8_SCALE;
+                float inv_scale = 1.0f / scale;
 
                 // SIMD quantization - using more registers for better parallelism
                 int8_t* data_ptr = reinterpret_cast<int8_t*>(buffer.data());
-                const float32x4_t scale_vec = vdupq_n_f32(scale);
+                const float32x4_t scale_vec = vdupq_n_f32(inv_scale);
 
                 size_t i = 0;
                 size_t vec_size =
@@ -242,14 +245,14 @@ namespace ndd {
 
                 // Handle remaining elements
                 for(; i < dimension; ++i) {
-                    float scaled = input[i] * scale;
+                    float scaled = input[i] * inv_scale;
                     data_ptr[i] = static_cast<int8_t>(std::round(scaled));
                 }
 
-                // Store INVERSE scale for dequantization (abs_max/FP8_SCALE)
+                // Store scale for dequantization
                 float* scale_ptr =
                         reinterpret_cast<float*>(buffer.data() + (dimension * sizeof(int8_t)));
-                *scale_ptr = abs_max / INT8_SCALE;
+                *scale_ptr = scale;
 
                 return buffer;
             }
@@ -270,7 +273,8 @@ namespace ndd {
                 if(abs_max == 0.0f) {
                     abs_max = 1.0f;
                 }
-                float scale = INT8_SCALE / abs_max;
+                float scale = abs_max / INT8_SCALE;
+                float inv_scale = 1.0f / scale;
 
                 int8_t* data_ptr = reinterpret_cast<int8_t*>(buffer.data());
 
@@ -279,7 +283,7 @@ namespace ndd {
 
                 while(svptest_any(svptrue_b32(), pg)) {
                     svfloat32_t vec = svld1_f32(pg, &input[i]);
-                    vec = svmul_f32_x(pg, vec, svdup_f32(scale));
+                    vec = svmul_f32_x(pg, vec, svdup_f32(inv_scale));
 
                     // Round to nearest integer, ties away from zero (matches std::round/vcvta)
                     vec = svrinta_f32_x(pg, vec);
@@ -301,7 +305,7 @@ namespace ndd {
 
                 float* scale_ptr =
                         reinterpret_cast<float*>(buffer.data() + (dimension * sizeof(int8_t)));
-                *scale_ptr = abs_max / INT8_SCALE;
+                *scale_ptr = scale;
 
                 return buffer;
             }
@@ -343,10 +347,11 @@ namespace ndd {
                 if(abs_max == 0.0f) {
                     abs_max = 1.0f;
                 }
-                float scale = INT8_SCALE / abs_max;
+                float scale = abs_max / INT8_SCALE;
+                float inv_scale = 1.0f / scale;
 
                 int8_t* data_ptr = reinterpret_cast<int8_t*>(buffer.data());
-                __m256 scale_vec = _mm256_set1_ps(scale);
+                __m256 scale_vec = _mm256_set1_ps(inv_scale);
 
                 i = 0;
                 for(; i + 32 <= dimension; i += 32) {
@@ -378,13 +383,13 @@ namespace ndd {
                 }
 
                 for(; i < dimension; ++i) {
-                    float scaled = input[i] * scale;
+                    float scaled = input[i] * inv_scale;
                     data_ptr[i] = static_cast<int8_t>(std::round(scaled));
                 }
 
                 float* scale_ptr =
                         reinterpret_cast<float*>(buffer.data() + (dimension * sizeof(int8_t)));
-                *scale_ptr = abs_max / INT8_SCALE;
+                *scale_ptr = scale;
 
                 return buffer;
             }
@@ -412,9 +417,9 @@ namespace ndd {
                                                                             size_t dimension) {
                 std::vector<float> output(dimension);
                 const int8_t* data_ptr = reinterpret_cast<const int8_t*>(buffer);
-                float scale = extract_inv_scale(buffer, dimension);
+                float scale = extract_scale(buffer, dimension);
 
-                const __m512 inv_scale_vec = _mm512_set1_ps(1.0f / scale);
+                const __m512 scale_vec = _mm512_set1_ps(scale);
 
                 size_t i = 0;
                 size_t vec_size =
@@ -440,11 +445,11 @@ namespace ndd {
                     __m512 float_vec2 = _mm512_cvtepi32_ps(int32_vec2);
                     __m512 float_vec3 = _mm512_cvtepi32_ps(int32_vec3);
 
-                    // Apply inverse scale
-                    float_vec0 = _mm512_mul_ps(float_vec0, inv_scale_vec);
-                    float_vec1 = _mm512_mul_ps(float_vec1, inv_scale_vec);
-                    float_vec2 = _mm512_mul_ps(float_vec2, inv_scale_vec);
-                    float_vec3 = _mm512_mul_ps(float_vec3, inv_scale_vec);
+                    // Apply scale
+                    float_vec0 = _mm512_mul_ps(float_vec0, scale_vec);
+                    float_vec1 = _mm512_mul_ps(float_vec1, scale_vec);
+                    float_vec2 = _mm512_mul_ps(float_vec2, scale_vec);
+                    float_vec3 = _mm512_mul_ps(float_vec3, scale_vec);
 
                     // Store results
                     _mm512_storeu_ps(&output[i], float_vec0);
@@ -459,13 +464,13 @@ namespace ndd {
                     __m128i int8_vec = _mm_loadu_si128((__m128i*)&data_ptr[i]);
                     __m512i int32_vec = _mm512_cvtepi8_epi32(int8_vec);
                     __m512 float_vec = _mm512_cvtepi32_ps(int32_vec);
-                    float_vec = _mm512_mul_ps(float_vec, inv_scale_vec);
+                    float_vec = _mm512_mul_ps(float_vec, scale_vec);
                     _mm512_storeu_ps(&output[i], float_vec);
                 }
 
                 // Handle remaining elements
                 for(; i < dimension; ++i) {
-                    output[i] = static_cast<float>(data_ptr[i]) / scale;
+                    output[i] = static_cast<float>(data_ptr[i]) * scale;
                 }
 
                 return output;
@@ -477,9 +482,9 @@ namespace ndd {
                                                                           size_t dimension) {
                 std::vector<float> output(dimension);
                 const int8_t* data_ptr = reinterpret_cast<const int8_t*>(buffer);
-                float scale = extract_inv_scale(buffer, dimension);
+                float scale = extract_scale(buffer, dimension);
 
-                const float32x4_t inv_scale_vec = vdupq_n_f32(1.0f / scale);
+                const float32x4_t scale_vec = vdupq_n_f32(scale);
 
                 size_t i = 0;
                 size_t vec_size =
@@ -505,11 +510,11 @@ namespace ndd {
                     float32x4_t float_2 = vcvtq_f32_s32(int32_2);
                     float32x4_t float_3 = vcvtq_f32_s32(int32_3);
 
-                    // Apply inverse scale
-                    float_0 = vmulq_f32(float_0, inv_scale_vec);
-                    float_1 = vmulq_f32(float_1, inv_scale_vec);
-                    float_2 = vmulq_f32(float_2, inv_scale_vec);
-                    float_3 = vmulq_f32(float_3, inv_scale_vec);
+                    // Apply scale
+                    float_0 = vmulq_f32(float_0, scale_vec);
+                    float_1 = vmulq_f32(float_1, scale_vec);
+                    float_2 = vmulq_f32(float_2, scale_vec);
+                    float_3 = vmulq_f32(float_3, scale_vec);
 
                     // Store results
                     vst1q_f32(&output[i], float_0);
@@ -520,7 +525,7 @@ namespace ndd {
 
                 // Handle remaining elements
                 for(; i < dimension; ++i) {
-                    output[i] = static_cast<float>(data_ptr[i]) / scale;
+                    output[i] = static_cast<float>(data_ptr[i]) * scale;
                 }
 
                 return output;
@@ -532,7 +537,7 @@ namespace ndd {
                                                                          size_t dimension) {
                 std::vector<float> output(dimension);
                 const int8_t* data_ptr = reinterpret_cast<const int8_t*>(buffer);
-                float scale = extract_inv_scale(buffer, dimension);
+                float scale = extract_scale(buffer, dimension);
 
                 size_t i = 0;
                 svbool_t pg = svwhilelt_b32(i, dimension);
@@ -540,7 +545,7 @@ namespace ndd {
                 while(svptest_any(svptrue_b32(), pg)) {
                     svint32_t int_vec = svld1sb_s32(pg, &data_ptr[i]);
                     svfloat32_t float_vec = svcvt_f32_s32_x(pg, int_vec);
-                    float_vec = svmul_f32_x(pg, float_vec, svdup_f32(1.0f / scale));
+                    float_vec = svmul_f32_x(pg, float_vec, svdup_f32(scale));
                     svst1_f32(pg, &output[i], float_vec);
 
                     i += svcntw();
@@ -563,10 +568,10 @@ namespace ndd {
                 // Scalar fallback
                 std::vector<float> output(dimension);
                 const int8_t* data_ptr = reinterpret_cast<const int8_t*>(buffer);
-                float scale = extract_inv_scale(buffer, dimension);
+                float scale = extract_scale(buffer, dimension);
 
                 for(size_t i = 0; i < dimension; ++i) {
-                    output[i] = static_cast<float>(data_ptr[i]) / scale;
+                    output[i] = static_cast<float>(data_ptr[i]) * scale;
                 }
                 return output;
 #endif
@@ -586,8 +591,8 @@ namespace ndd {
                 const auto* params = static_cast<const hnswlib::DistParams*>(qty_ptr);
                 size_t qty = params->dim;
 
-                float scale1 = extract_inv_scale((const uint8_t*)pVect1, qty);
-                float scale2 = extract_inv_scale((const uint8_t*)pVect2, qty);
+                float scale1 = extract_scale((const uint8_t*)pVect1, qty);
+                float scale2 = extract_scale((const uint8_t*)pVect2, qty);
 
                 float res = 0;
                 size_t i = 0;
@@ -643,43 +648,88 @@ namespace ndd {
                 sum_lo = _mm_hadd_ps(sum_lo, sum_lo);
                 res = _mm_cvtss_f32(sum_lo);
 #elif defined(USE_SVE2)
-                svbool_t pg = svwhilelt_b32(i, qty);
-                svfloat32_t sum = svdup_f32(0.0f);
-                svfloat32_t v_scale1 = svdup_f32(scale1);
-                svfloat32_t v_scale2 = svdup_f32(scale2);
+                svint32_t sum_sq1 = svdup_s32(0);
+                svint32_t sum_sq2 = svdup_s32(0);
+                svint32_t sum_prod = svdup_s32(0);
 
-                while(svptest_any(svptrue_b32(), pg)) {
-                    // Load int8 as int32
-                    svint32_t v1_i32 = svld1sb_s32(pg, pVect1 + i);
-                    svint32_t v2_i32 = svld1sb_s32(pg, pVect2 + i);
+                // Use svdot_s32 for efficient processing (3 streams)
+                uint64_t num_bytes = svcntb();
+                size_t unroll_stride = num_bytes * 2;
+                svbool_t pg_all = svptrue_b8();
 
-                    svfloat32_t v1_f = svcvt_f32_s32_x(pg, v1_i32);
-                    svfloat32_t v2_f = svcvt_f32_s32_x(pg, v2_i32);
+                for(; i + unroll_stride <= qty; i += unroll_stride) {
+                    svint8_t v1_0 = svld1_s8(pg_all, pVect1 + i);
+                    svint8_t v2_0 = svld1_s8(pg_all, pVect2 + i);
+                    sum_sq1 = svdot_s32(sum_sq1, v1_0, v1_0);
+                    sum_sq2 = svdot_s32(sum_sq2, v2_0, v2_0);
+                    sum_prod = svdot_s32(sum_prod, v1_0, v2_0);
 
-                    v1_f = svmul_f32_x(pg, v1_f, v_scale1);
-                    v2_f = svmul_f32_x(pg, v2_f, v_scale2);
-
-                    svfloat32_t diff = svsub_f32_x(pg, v1_f, v2_f);
-                    sum = svmla_f32_x(pg, sum, diff, diff);
-
-                    i += svcntw();
-                    pg = svwhilelt_b32(i, qty);
+                    svint8_t v1_1 = svld1_s8(pg_all, pVect1 + i + num_bytes);
+                    svint8_t v2_1 = svld1_s8(pg_all, pVect2 + i + num_bytes);
+                    sum_sq1 = svdot_s32(sum_sq1, v1_1, v1_1);
+                    sum_sq2 = svdot_s32(sum_sq2, v2_1, v2_1);
+                    sum_prod = svdot_s32(sum_prod, v1_1, v2_1);
                 }
-                res = svaddv_f32(svptrue_b32(), sum);
+
+                // Handle remaining elements (use svdot if possible, or fallback loop)
+                svbool_t pg8 = svwhilelt_b8(i, qty);
+                while(svptest_any(svptrue_b8(), pg8)) {
+                    svint8_t v1 = svld1_s8(pg8, pVect1 + i);
+                    svint8_t v2 = svld1_s8(pg8, pVect2 + i);
+                    sum_sq1 = svdot_s32(sum_sq1, v1, v1);
+                    sum_sq2 = svdot_s32(sum_sq2, v2, v2);
+                    sum_prod = svdot_s32(sum_prod, v1, v2);
+
+                    i += svcntb();
+                    pg8 = svwhilelt_b8(i, qty);
+                }
+
+                float dot1 = static_cast<float>(svaddv_s32(svptrue_b32(), sum_sq1));
+                float dot2 = static_cast<float>(svaddv_s32(svptrue_b32(), sum_sq2));
+                float dot_prod = static_cast<float>(svaddv_s32(svptrue_b32(), sum_prod));
+
+                res = (dot1 * scale1) * scale1 + (dot2 * scale2) * scale2 -
+                      2.0f * ((dot_prod * scale1) * scale2);
+
 #elif defined(USE_NEON)
                 // NEON implementation for L2Sqr
                 // Uses the expansion: (a*s1 - b*s2)^2 = a^2*s1^2 + b^2*s2^2 - 2ab*s1*s2
                 // This allows using integer dot products for the terms.
 
-                float s1_sq = scale1 * scale1;
-                float s2_sq = scale2 * scale2;
-                float s1_s2_2 = 2.0f * scale1 * scale2;
 
                 int32x4_t sum_sq1 = vdupq_n_s32(0);
                 int32x4_t sum_sq2 = vdupq_n_s32(0);
                 int32x4_t sum_prod = vdupq_n_s32(0);
 
 #    if defined(__ARM_FEATURE_DOTPROD)
+                size_t qty64 = qty / 64;
+                for(; i < qty64 * 64; i += 64) {
+                    int8x16_t v1_0 = vld1q_s8(pVect1 + i);
+                    int8x16_t v2_0 = vld1q_s8(pVect2 + i);
+                    int8x16_t v1_1 = vld1q_s8(pVect1 + i + 16);
+                    int8x16_t v2_1 = vld1q_s8(pVect2 + i + 16);
+                    int8x16_t v1_2 = vld1q_s8(pVect1 + i + 32);
+                    int8x16_t v2_2 = vld1q_s8(pVect2 + i + 32);
+                    int8x16_t v1_3 = vld1q_s8(pVect1 + i + 48);
+                    int8x16_t v2_3 = vld1q_s8(pVect2 + i + 48);
+
+                    sum_sq1 = vdotq_s32(sum_sq1, v1_0, v1_0);
+                    sum_sq2 = vdotq_s32(sum_sq2, v2_0, v2_0);
+                    sum_prod = vdotq_s32(sum_prod, v1_0, v2_0);
+
+                    sum_sq1 = vdotq_s32(sum_sq1, v1_1, v1_1);
+                    sum_sq2 = vdotq_s32(sum_sq2, v2_1, v2_1);
+                    sum_prod = vdotq_s32(sum_prod, v1_1, v2_1);
+
+                    sum_sq1 = vdotq_s32(sum_sq1, v1_2, v1_2);
+                    sum_sq2 = vdotq_s32(sum_sq2, v2_2, v2_2);
+                    sum_prod = vdotq_s32(sum_prod, v1_2, v2_2);
+
+                    sum_sq1 = vdotq_s32(sum_sq1, v1_3, v1_3);
+                    sum_sq2 = vdotq_s32(sum_sq2, v2_3, v2_3);
+                    sum_prod = vdotq_s32(sum_prod, v1_3, v2_3);
+                }
+
                 size_t qty16 = qty / 16;
                 for(; i < qty16 * 16; i += 16) {
                     int8x16_t v1 = vld1q_s8(pVect1 + i);
@@ -689,48 +739,14 @@ namespace ndd {
                     sum_sq2 = vdotq_s32(sum_sq2, v2, v2);
                     sum_prod = vdotq_s32(sum_prod, v1, v2);
                 }
-#    else
-                size_t qty16 = qty / 16;
-                for(; i < qty16 * 16; i += 16) {
-                    int8x16_t v1 = vld1q_s8(pVect1 + i);
-                    int8x16_t v2 = vld1q_s8(pVect2 + i);
-
-                    int16x8_t v1_lo = vmovl_s8(vget_low_s8(v1));
-                    int16x8_t v1_hi = vmovl_s8(vget_high_s8(v1));
-                    int16x8_t v2_lo = vmovl_s8(vget_low_s8(v2));
-                    int16x8_t v2_hi = vmovl_s8(vget_high_s8(v2));
-
-                    // v1^2
-                    int32x4_t sq1_lo = vmull_s16(vget_low_s16(v1_lo), vget_low_s16(v1_lo));
-                    int32x4_t sq1_hi = vmull_s16(vget_high_s16(v1_lo), vget_high_s16(v1_lo));
-                    sum_sq1 = vaddq_s32(sum_sq1, vaddq_s32(sq1_lo, sq1_hi));
-                    sq1_lo = vmull_s16(vget_low_s16(v1_hi), vget_low_s16(v1_hi));
-                    sq1_hi = vmull_s16(vget_high_s16(v1_hi), vget_high_s16(v1_hi));
-                    sum_sq1 = vaddq_s32(sum_sq1, vaddq_s32(sq1_lo, sq1_hi));
-
-                    // v2^2
-                    int32x4_t sq2_lo = vmull_s16(vget_low_s16(v2_lo), vget_low_s16(v2_lo));
-                    int32x4_t sq2_hi = vmull_s16(vget_high_s16(v2_lo), vget_high_s16(v2_lo));
-                    sum_sq2 = vaddq_s32(sum_sq2, vaddq_s32(sq2_lo, sq2_hi));
-                    sq2_lo = vmull_s16(vget_low_s16(v2_hi), vget_low_s16(v2_hi));
-                    sq2_hi = vmull_s16(vget_high_s16(v2_hi), vget_high_s16(v2_hi));
-                    sum_sq2 = vaddq_s32(sum_sq2, vaddq_s32(sq2_lo, sq2_hi));
-
-                    // v1*v2
-                    int32x4_t prod_lo = vmull_s16(vget_low_s16(v1_lo), vget_low_s16(v2_lo));
-                    int32x4_t prod_hi = vmull_s16(vget_high_s16(v1_lo), vget_high_s16(v2_lo));
-                    sum_prod = vaddq_s32(sum_prod, vaddq_s32(prod_lo, prod_hi));
-                    prod_lo = vmull_s16(vget_low_s16(v1_hi), vget_low_s16(v2_hi));
-                    prod_hi = vmull_s16(vget_high_s16(v1_hi), vget_high_s16(v2_hi));
-                    sum_prod = vaddq_s32(sum_prod, vaddq_s32(prod_lo, prod_hi));
-                }
 #    endif
 
                 float dot1 = static_cast<float>(vaddvq_s32(sum_sq1));
                 float dot2 = static_cast<float>(vaddvq_s32(sum_sq2));
                 float dot_prod = static_cast<float>(vaddvq_s32(sum_prod));
 
-                res = dot1 * s1_sq + dot2 * s2_sq - dot_prod * s1_s2_2;
+                res = (dot1 * scale1) * scale1 + (dot2 * scale2) * scale2 -
+                      2.0f * ((dot_prod * scale1) * scale2);
 #endif
 
                 for(; i < qty; i++) {
@@ -753,8 +769,8 @@ namespace ndd {
                 const auto* params = static_cast<const hnswlib::DistParams*>(qty_ptr);
                 size_t qty = params->dim;
 
-                float scale1 = extract_inv_scale((const uint8_t*)pVect1, qty);
-                float scale2 = extract_inv_scale((const uint8_t*)pVect2, qty);
+                float scale1 = extract_scale((const uint8_t*)pVect1, qty);
+                float scale2 = extract_scale((const uint8_t*)pVect2, qty);
 
                 int32_t sum = 0;
                 size_t i = 0;
@@ -794,26 +810,53 @@ namespace ndd {
                 sum_128 = _mm_hadd_epi32(sum_128, sum_128);
                 sum = _mm_cvtsi128_si32(sum_128);
 #elif defined(USE_SVE2)
-                svbool_t pg8 = svwhilelt_b8(i, qty);
-                svint32_t v_sum = svdup_s32(0);
+                uint64_t num_bytes = svcntb();
+                size_t unroll_stride = num_bytes * 4;
+                svbool_t pg_all = svptrue_b8();
 
+                svint32_t sum0 = svdup_s32(0);
+                svint32_t sum1 = svdup_s32(0);
+                svint32_t sum2 = svdup_s32(0);
+                svint32_t sum3 = svdup_s32(0);
+
+                for(; i + unroll_stride <= qty; i += unroll_stride) {
+                    svint8_t v1_0 = svld1_s8(pg_all, pVect1 + i);
+                    svint8_t v2_0 = svld1_s8(pg_all, pVect2 + i);
+                    sum0 = svdot_s32(sum0, v1_0, v2_0);
+
+                    svint8_t v1_1 = svld1_s8(pg_all, pVect1 + i + num_bytes);
+                    svint8_t v2_1 = svld1_s8(pg_all, pVect2 + i + num_bytes);
+                    sum1 = svdot_s32(sum1, v1_1, v2_1);
+
+                    svint8_t v1_2 = svld1_s8(pg_all, pVect1 + i + 2 * num_bytes);
+                    svint8_t v2_2 = svld1_s8(pg_all, pVect2 + i + 2 * num_bytes);
+                    sum2 = svdot_s32(sum2, v1_2, v2_2);
+
+                    svint8_t v1_3 = svld1_s8(pg_all, pVect1 + i + 3 * num_bytes);
+                    svint8_t v2_3 = svld1_s8(pg_all, pVect2 + i + 3 * num_bytes);
+                    sum3 = svdot_s32(sum3, v1_3, v2_3);
+                }
+
+                sum0 = svadd_s32_x(svptrue_b32(), sum0, sum1);
+                sum2 = svadd_s32_x(svptrue_b32(), sum2, sum3);
+                sum0 = svadd_s32_x(svptrue_b32(), sum0, sum2);
+
+                svbool_t pg8 = svwhilelt_b8(i, qty);
                 while(svptest_any(svptrue_b8(), pg8)) {
                     svint8_t v1 = svld1_s8(pg8, pVect1 + i);
                     svint8_t v2 = svld1_s8(pg8, pVect2 + i);
-                    v_sum = svdot_s32(v_sum, v1, v2);
+                    sum0 = svdot_s32(sum0, v1, v2);
 
                     i += svcntb();
                     pg8 = svwhilelt_b8(i, qty);
                 }
-                sum = svaddv_s32(svptrue_b32(), v_sum);
+                sum = svaddv_s32(svptrue_b32(), sum0);
 #elif defined(USE_NEON)
                 int32x4_t sum_vec0 = vdupq_n_s32(0);
                 int32x4_t sum_vec1 = vdupq_n_s32(0);
                 int32x4_t sum_vec2 = vdupq_n_s32(0);
                 int32x4_t sum_vec3 = vdupq_n_s32(0);
 
-// Use dot product instructions if available (ARMv8.2+)
-#    if defined(__ARM_FEATURE_DOTPROD)
                 size_t qty64 = qty / 64;
                 for(; i < qty64 * 64; i += 64) {
                     int8x16_t v1_0 = vld1q_s8(pVect1 + i);
@@ -837,22 +880,6 @@ namespace ndd {
                     int8x16_t v2 = vld1q_s8(pVect2 + i);
                     sum_vec0 = vdotq_s32(sum_vec0, v1, v2);
                 }
-#    else
-                // Fallback for older NEON
-                size_t qty16 = qty / 16;
-                for(; i < qty16 * 16; i += 16) {
-                    int8x16_t v1 = vld1q_s8(pVect1 + i);
-                    int8x16_t v2 = vld1q_s8(pVect2 + i);
-
-                    int16x8_t prod_low = vmull_s8(vget_low_s8(v1), vget_low_s8(v2));
-                    int16x8_t prod_high = vmull_s8(vget_high_s8(v1), vget_high_s8(v2));
-
-                    int32x4_t sum_low = vpaddlq_s16(prod_low);
-                    int32x4_t sum_high = vpaddlq_s16(prod_high);
-
-                    sum_vec0 = vaddq_s32(sum_vec0, vaddq_s32(sum_low, sum_high));
-                }
-#    endif
 
                 sum_vec0 = vaddq_s32(sum_vec0, sum_vec1);
                 sum_vec2 = vaddq_s32(sum_vec2, sum_vec3);
@@ -865,7 +892,7 @@ namespace ndd {
                     sum += static_cast<int32_t>(pVect1[i]) * static_cast<int32_t>(pVect2[i]);
                 }
 
-                return static_cast<float>(sum) * scale1 * scale2;
+                return (static_cast<float>(sum) * scale1) * scale2;
             }
 
             static float
@@ -910,7 +937,7 @@ namespace ndd {
                 d.dequantize = &int8d::dequantize;
                 d.quantize_to_int8 = &int8d::quantize_to_int8_identity;
                 d.get_storage_size = &int8d::get_storage_size;
-                d.extract_inv_scale = &int8d::extract_inv_scale;
+                d.extract_scale = &int8d::extract_scale;
                 return d;
             }
         };

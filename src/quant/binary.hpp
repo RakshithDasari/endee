@@ -28,7 +28,7 @@ namespace ndd {
             }
 
             // No scale for binary quantization
-            inline float extract_inv_scale(const uint8_t* buffer, size_t dimension) {
+            inline float extract_scale(const uint8_t* buffer, size_t dimension) {
                 return 1.0f;
             }
 
@@ -666,7 +666,7 @@ namespace ndd {
                 d.dequantize = &binary::dequantize;
                 d.quantize_to_int8 = &binary::quantize_to_int8;
                 d.get_storage_size = &binary::get_storage_size;
-                d.extract_inv_scale = &binary::extract_inv_scale;
+                d.extract_scale = &binary::extract_scale;
                 return d;
             }
         };

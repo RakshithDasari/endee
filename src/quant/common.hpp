@@ -28,7 +28,6 @@ namespace ndd {
             FP32 = 32,   // Full precision float (4 bytes per dimension)
             INT16 = 16,  // Dynamic 16-bit integer quantization
             FP16 = 15,   // Half precision float (2 bytes per dimension)
-            INT4 = 5,    // Dynamic 4-bit integer quantization
             BINARY = 1,  // Binary quantization (1 bit per dimension)
             INT8 = 8,    // Dynamic 8-bit integer quantization
             UNKNOWN = 0
@@ -55,7 +54,7 @@ namespace ndd {
 
             // Metadata
             size_t (*get_storage_size)(size_t dim);
-            float (*extract_inv_scale)(const uint8_t* in, size_t dim);
+            float (*extract_scale)(const uint8_t* in, size_t dim);
         };
 
         // Abstract base class for Quantization implementations

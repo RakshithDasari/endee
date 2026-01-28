@@ -42,7 +42,7 @@ namespace hnswlib {
                 return result;
             }
 
-            inline float extract_inv_scale(const uint8_t* in, size_t dim) {
+            inline float extract_scale(const uint8_t* in, size_t dim) {
                 return 1.0f;
             }
 
@@ -555,7 +555,7 @@ namespace ndd {
                 d.dequantize = &hnswlib::quant::float32::dequantize;
                 d.quantize_to_int8 = &hnswlib::quant::float32::quantize_to_int8;
                 d.get_storage_size = [](size_t dim) { return dim * sizeof(float); };
-                d.extract_inv_scale = &hnswlib::quant::float32::extract_inv_scale;
+                d.extract_scale = &hnswlib::quant::float32::extract_scale;
                 return d;
             }
         };

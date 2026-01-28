@@ -16,7 +16,7 @@ namespace ndd {
                 return dimension * sizeof(uint16_t);
             }
 
-            inline float extract_inv_scale(const uint8_t* in, size_t dim) {
+            inline float extract_scale(const uint8_t* in, size_t dim) {
                 return 1.0f;
             }
 
@@ -1083,7 +1083,7 @@ namespace ndd {
                 d.dequantize = &float16::dequantize;
                 d.quantize_to_int8 = &float16::quantize_to_int8;
                 d.get_storage_size = &float16::get_storage_size;
-                d.extract_inv_scale = &float16::extract_inv_scale;
+                d.extract_scale = &float16::extract_scale;
                 return d;
             }
         };

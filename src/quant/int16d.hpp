@@ -17,7 +17,7 @@ namespace ndd {
                 return dimension * sizeof(int16_t) + sizeof(float);
             }
 
-            inline float extract_inv_scale(const uint8_t* buffer, size_t dimension) {
+            inline float extract_scale(const uint8_t* buffer, size_t dimension) {
                 return *reinterpret_cast<const float*>(buffer + dimension * sizeof(int16_t));
             }
 
@@ -37,19 +37,20 @@ namespace ndd {
                 if(abs_max == 0.0f) {
                     abs_max = 1.0f;  // Avoid division by zero
                 }
-                float scale = INT16_SCALE / abs_max;
+                float scale = abs_max / INT16_SCALE;
+                float inv_scale = 1.0f / scale;
 
                 // Quantize data
                 int16_t* data_ptr = reinterpret_cast<int16_t*>(buffer.data());
                 for(size_t i = 0; i < dimension; ++i) {
-                    float scaled = input[i] * scale;
+                    float scaled = input[i] * inv_scale;
                     data_ptr[i] = static_cast<int16_t>(std::round(scaled));
                 }
 
-                // Store INVERSE scale for dequantization (abs_max/FP16_SCALE)
+                // Store scale for dequantization
                 float* scale_ptr =
                         reinterpret_cast<float*>(buffer.data() + (dimension * sizeof(int16_t)));
-                *scale_ptr = abs_max / INT16_SCALE;
+                *scale_ptr = scale;
 
                 return buffer;
             }
@@ -70,11 +71,12 @@ namespace ndd {
                 if(abs_max == 0.0f) {
                     abs_max = 1.0f;
                 }
-                float scale = INT16_SCALE / abs_max;
+                float scale = abs_max / INT16_SCALE;
+                float inv_scale = 1.0f / scale;
 
                 // SIMD quantization - using 24 ZMM registers (75% utilization)
                 int16_t* data_ptr = reinterpret_cast<int16_t*>(buffer.data());
-                const __m512 scale_vec = _mm512_set1_ps(scale);
+                const __m512 scale_vec = _mm512_set1_ps(inv_scale);
 
                 size_t i = 0;
                 size_t vec_size =
@@ -146,14 +148,14 @@ namespace ndd {
 
                 // Handle remaining elements
                 for(; i < dimension; ++i) {
-                    float scaled = input[i] * scale;
+                    float scaled = input[i] * inv_scale;
                     data_ptr[i] = static_cast<int16_t>(std::round(scaled));
                 }
 
-                // Store INVERSE scale for dequantization (abs_max/FP16_SCALE)
+                // Store scale for dequantization
                 float* scale_ptr =
                         reinterpret_cast<float*>(buffer.data() + (dimension * sizeof(int16_t)));
-                *scale_ptr = abs_max / INT16_SCALE;
+                *scale_ptr = scale;
 
                 return buffer;
             }
@@ -176,11 +178,12 @@ namespace ndd {
                 if(abs_max == 0.0f) {
                     abs_max = 1.0f;
                 }
-                float scale = INT16_SCALE / abs_max;
+                float scale = abs_max / INT16_SCALE;
+                float inv_scale = 1.0f / scale;
 
                 // SIMD quantization - using more registers for better parallelism
                 int16_t* data_ptr = reinterpret_cast<int16_t*>(buffer.data());
-                const float32x4_t scale_vec = vdupq_n_f32(scale);
+                const float32x4_t scale_vec = vdupq_n_f32(inv_scale);
 
                 size_t i = 0;
                 size_t vec_size =
@@ -249,14 +252,14 @@ namespace ndd {
 
                 // Handle remaining elements
                 for(; i < dimension; ++i) {
-                    float scaled = input[i] * scale;
+                    float scaled = input[i] * inv_scale;
                     data_ptr[i] = static_cast<int16_t>(std::round(scaled));
                 }
 
-                // Store INVERSE scale for dequantization (abs_max/FP16_SCALE)
+                // Store scale for dequantization
                 float* scale_ptr =
                         reinterpret_cast<float*>(buffer.data() + (dimension * sizeof(int16_t)));
-                *scale_ptr = abs_max / INT16_SCALE;
+                *scale_ptr = scale;
 
                 return buffer;
             }
@@ -278,7 +281,8 @@ namespace ndd {
                 if(abs_max == 0.0f) {
                     abs_max = 1.0f;
                 }
-                float scale = INT16_SCALE / abs_max;
+                float scale = abs_max / INT16_SCALE;
+                float inv_scale = 1.0f / scale;
 
                 int16_t* data_ptr = reinterpret_cast<int16_t*>(buffer.data());
 
@@ -287,7 +291,7 @@ namespace ndd {
 
                 while(svptest_any(svptrue_b32(), pg)) {
                     svfloat32_t vec = svld1_f32(pg, &input[i]);
-                    vec = svmul_f32_x(pg, vec, svdup_f32(scale));
+                    vec = svmul_f32_x(pg, vec, svdup_f32(inv_scale));
 
                     // Convert to int32 (with rounding)
                     svint32_t int_vec = svcvt_s32_f32_x(pg, vec);
@@ -299,10 +303,10 @@ namespace ndd {
                     pg = svwhilelt_b32(i, dimension);
                 }
 
-                // Store INVERSE scale for dequantization
+                // Store scale for dequantization
                 float* scale_ptr =
                         reinterpret_cast<float*>(buffer.data() + (dimension * sizeof(int16_t)));
-                *scale_ptr = abs_max / INT16_SCALE;
+                *scale_ptr = scale;
 
                 return buffer;
             }
@@ -328,9 +332,9 @@ namespace ndd {
                                                                              size_t dimension) {
                 std::vector<float> output(dimension);
                 const int16_t* data_ptr = reinterpret_cast<const int16_t*>(buffer);
-                float scale = extract_inv_scale(buffer, dimension);
+                float scale = extract_scale(buffer, dimension);
 
-                const __m512 inv_scale_vec = _mm512_set1_ps(1.0f / scale);
+                const __m512 scale_vec = _mm512_set1_ps(scale);
 
                 size_t i = 0;
                 size_t vec_size =
@@ -350,9 +354,9 @@ namespace ndd {
                     __m512 float_vec0 = _mm512_cvtepi32_ps(int32_vec0);
                     __m512 float_vec1 = _mm512_cvtepi32_ps(int32_vec1);
 
-                    // Apply inverse scale
-                    float_vec0 = _mm512_mul_ps(float_vec0, inv_scale_vec);
-                    float_vec1 = _mm512_mul_ps(float_vec1, inv_scale_vec);
+                    // Apply scale
+                    float_vec0 = _mm512_mul_ps(float_vec0, scale_vec);
+                    float_vec1 = _mm512_mul_ps(float_vec1, scale_vec);
 
                     // Store results
                     _mm512_storeu_ps(&output[i], float_vec0);
@@ -365,13 +369,13 @@ namespace ndd {
                     __m256i int16_vec = _mm256_loadu_si256((__m256i*)&data_ptr[i]);
                     __m512i int32_vec = _mm512_cvtepi16_epi32(int16_vec);
                     __m512 float_vec = _mm512_cvtepi32_ps(int32_vec);
-                    float_vec = _mm512_mul_ps(float_vec, inv_scale_vec);
+                    float_vec = _mm512_mul_ps(float_vec, scale_vec);
                     _mm512_storeu_ps(&output[i], float_vec);
                 }
 
                 // Handle remaining elements
                 for(; i < dimension; ++i) {
-                    output[i] = static_cast<float>(data_ptr[i]) / scale;
+                    output[i] = static_cast<float>(data_ptr[i]) * scale;
                 }
 
                 return output;
@@ -383,9 +387,9 @@ namespace ndd {
                                                                            size_t dimension) {
                 std::vector<float> output(dimension);
                 const int16_t* data_ptr = reinterpret_cast<const int16_t*>(buffer);
-                float scale = extract_inv_scale(buffer, dimension);
+                float scale = extract_scale(buffer, dimension);
 
-                const float32x4_t inv_scale_vec = vdupq_n_f32(1.0f / scale);
+                const float32x4_t scale_vec = vdupq_n_f32(scale);
 
                 size_t i = 0;
                 size_t vec_size =
@@ -408,11 +412,11 @@ namespace ndd {
                     float32x4_t float_2 = vcvtq_f32_s32(int32_2);
                     float32x4_t float_3 = vcvtq_f32_s32(int32_3);
 
-                    // Apply inverse scale
-                    float_0 = vmulq_f32(float_0, inv_scale_vec);
-                    float_1 = vmulq_f32(float_1, inv_scale_vec);
-                    float_2 = vmulq_f32(float_2, inv_scale_vec);
-                    float_3 = vmulq_f32(float_3, inv_scale_vec);
+                    // Apply scale
+                    float_0 = vmulq_f32(float_0, scale_vec);
+                    float_1 = vmulq_f32(float_1, scale_vec);
+                    float_2 = vmulq_f32(float_2, scale_vec);
+                    float_3 = vmulq_f32(float_3, scale_vec);
 
                     // Store results
                     vst1q_f32(&output[i], float_0);
@@ -423,7 +427,7 @@ namespace ndd {
 
                 // Handle remaining elements
                 for(; i < dimension; ++i) {
-                    output[i] = static_cast<float>(data_ptr[i]) / scale;
+                    output[i] = static_cast<float>(data_ptr[i]) * scale;
                 }
 
                 return output;
@@ -435,7 +439,7 @@ namespace ndd {
                                                                           size_t dimension) {
                 std::vector<float> output(dimension);
                 const int16_t* data_ptr = reinterpret_cast<const int16_t*>(buffer);
-                float scale = extract_inv_scale(buffer, dimension);
+                float scale = extract_scale(buffer, dimension);
 
                 size_t i = 0;
                 svbool_t pg = svwhilelt_b32(i, dimension);
@@ -447,8 +451,8 @@ namespace ndd {
                     // Convert to float
                     svfloat32_t float_vec = svcvt_f32_s32_x(pg, int_vec);
 
-                    // Apply inverse scale (division by scale)
-                    float_vec = svdiv_f32_x(pg, float_vec, svdup_f32(scale));
+                    // Apply scale
+                    float_vec = svmul_f32_x(pg, float_vec, svdup_f32(scale));
 
                     // Store results
                     svst1_f32(pg, &output[i], float_vec);
@@ -474,10 +478,10 @@ namespace ndd {
                 // Scalar fallback
                 std::vector<float> output(dimension);
                 const int16_t* data_ptr = reinterpret_cast<const int16_t*>(buffer);
-                float scale = extract_inv_scale(buffer, dimension);
+                float scale = extract_scale(buffer, dimension);
 
                 for(size_t i = 0; i < dimension; ++i) {
-                    output[i] = static_cast<float>(data_ptr[i]) / scale;
+                    output[i] = static_cast<float>(data_ptr[i]) * scale;
                 }
                 return output;
 #endif
@@ -497,8 +501,8 @@ namespace ndd {
                 const auto* params = static_cast<const hnswlib::DistParams*>(qty_ptr);
                 size_t qty = params->dim;
 
-                float scale1 = extract_inv_scale((const uint8_t*)pVect1, qty);
-                float scale2 = extract_inv_scale((const uint8_t*)pVect2, qty);
+                float scale1 = extract_scale((const uint8_t*)pVect1, qty);
+                float scale2 = extract_scale((const uint8_t*)pVect2, qty);
 
                 float res = 0;
                 size_t i = 0;
@@ -558,9 +562,98 @@ namespace ndd {
                 float32x4_t sum1 = vdupq_n_f32(0);
                 float32x4_t sum2 = vdupq_n_f32(0);
                 float32x4_t sum3 = vdupq_n_f32(0);
+                float32x4_t sum4 = vdupq_n_f32(0);
+                float32x4_t sum5 = vdupq_n_f32(0);
+                float32x4_t sum6 = vdupq_n_f32(0);
+                float32x4_t sum7 = vdupq_n_f32(0);
 
                 float32x4_t v_scale1 = vdupq_n_f32(scale1);
                 float32x4_t v_scale2 = vdupq_n_f32(scale2);
+
+                size_t qty32 = qty / 32;
+                for(; i < qty32 * 32; i += 32) {
+                    // Block 0 (16 elements)
+                    int16x8_t v1_0 = vld1q_s16(pVect1 + i);
+                    int16x8_t v2_0 = vld1q_s16(pVect2 + i);
+                    int16x8_t v1_1 = vld1q_s16(pVect1 + i + 8);
+                    int16x8_t v2_1 = vld1q_s16(pVect2 + i + 8);
+
+                    // Block 1 (16 elements)
+                    int16x8_t v1_2 = vld1q_s16(pVect1 + i + 16);
+                    int16x8_t v2_2 = vld1q_s16(pVect2 + i + 16);
+                    int16x8_t v1_3 = vld1q_s16(pVect1 + i + 24);
+                    int16x8_t v2_3 = vld1q_s16(pVect2 + i + 24);
+
+                    // Process v1_0 (8 elements) -> expands to 2 float vectors
+                    float32x4_t f1_0lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v1_0)));
+                    float32x4_t f2_0lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v2_0)));
+                    f1_0lo = vmulq_f32(f1_0lo, v_scale1);
+                    f2_0lo = vmulq_f32(f2_0lo, v_scale2);
+                    float32x4_t diff0 = vsubq_f32(f1_0lo, f2_0lo);
+                    sum0 = vmlaq_f32(sum0, diff0, diff0);
+
+                    float32x4_t f1_0hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v1_0)));
+                    float32x4_t f2_0hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v2_0)));
+                    f1_0hi = vmulq_f32(f1_0hi, v_scale1);
+                    f2_0hi = vmulq_f32(f2_0hi, v_scale2);
+                    float32x4_t diff1 = vsubq_f32(f1_0hi, f2_0hi);
+                    sum1 = vmlaq_f32(sum1, diff1, diff1);
+
+                    // Process v1_1 (8 elements)
+                    float32x4_t f1_1lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v1_1)));
+                    float32x4_t f2_1lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v2_1)));
+                    f1_1lo = vmulq_f32(f1_1lo, v_scale1);
+                    f2_1lo = vmulq_f32(f2_1lo, v_scale2);
+                    float32x4_t diff2 = vsubq_f32(f1_1lo, f2_1lo);
+                    sum2 = vmlaq_f32(sum2, diff2, diff2);
+
+                    float32x4_t f1_1hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v1_1)));
+                    float32x4_t f2_1hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v2_1)));
+                    f1_1hi = vmulq_f32(f1_1hi, v_scale1);
+                    f2_1hi = vmulq_f32(f2_1hi, v_scale2);
+                    float32x4_t diff3 = vsubq_f32(f1_1hi, f2_1hi);
+                    sum3 = vmlaq_f32(sum3, diff3, diff3);
+
+                    // Process v1_2 (8 elements)
+                    float32x4_t f1_2lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v1_2)));
+                    float32x4_t f2_2lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v2_2)));
+                    f1_2lo = vmulq_f32(f1_2lo, v_scale1);
+                    f2_2lo = vmulq_f32(f2_2lo, v_scale2);
+                    float32x4_t diff4 = vsubq_f32(f1_2lo, f2_2lo);
+                    sum4 = vmlaq_f32(sum4, diff4, diff4);
+
+                    float32x4_t f1_2hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v1_2)));
+                    float32x4_t f2_2hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v2_2)));
+                    f1_2hi = vmulq_f32(f1_2hi, v_scale1);
+                    f2_2hi = vmulq_f32(f2_2hi, v_scale2);
+                    float32x4_t diff5 = vsubq_f32(f1_2hi, f2_2hi);
+                    sum5 = vmlaq_f32(sum5, diff5, diff5);
+
+                    // Process v1_3 (8 elements)
+                    float32x4_t f1_3lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v1_3)));
+                    float32x4_t f2_3lo = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v2_3)));
+                    f1_3lo = vmulq_f32(f1_3lo, v_scale1);
+                    f2_3lo = vmulq_f32(f2_3lo, v_scale2);
+                    float32x4_t diff6 = vsubq_f32(f1_3lo, f2_3lo);
+                    sum6 = vmlaq_f32(sum6, diff6, diff6);
+
+                    float32x4_t f1_3hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v1_3)));
+                    float32x4_t f2_3hi = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v2_3)));
+                    f1_3hi = vmulq_f32(f1_3hi, v_scale1);
+                    f2_3hi = vmulq_f32(f2_3hi, v_scale2);
+                    float32x4_t diff7 = vsubq_f32(f1_3hi, f2_3hi);
+                    sum7 = vmlaq_f32(sum7, diff7, diff7);
+                }
+
+                sum0 = vaddq_f32(sum0, sum1);
+                sum2 = vaddq_f32(sum2, sum3);
+                sum4 = vaddq_f32(sum4, sum5);
+                sum6 = vaddq_f32(sum6, sum7);
+
+                sum0 = vaddq_f32(sum0, sum2);
+                sum4 = vaddq_f32(sum4, sum6);
+                sum0 = vaddq_f32(sum0, sum4);
+                res = vaddvq_f32(sum0);
 
                 size_t qty16 = qty / 16;
                 for(; i < qty16 * 16; i += 16) {
@@ -583,7 +676,7 @@ namespace ndd {
                     f1_1 = vmulq_f32(f1_1, v_scale1);
                     f2_1 = vmulq_f32(f2_1, v_scale2);
                     float32x4_t diff1 = vsubq_f32(f1_1, f2_1);
-                    sum1 = vmlaq_f32(sum1, diff1, diff1);
+                    sum0 = vmlaq_f32(sum0, diff1, diff1);
 
                     // Next 8
                     float32x4_t f1_2 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(v1_1)));
@@ -591,19 +684,15 @@ namespace ndd {
                     f1_2 = vmulq_f32(f1_2, v_scale1);
                     f2_2 = vmulq_f32(f2_2, v_scale2);
                     float32x4_t diff2 = vsubq_f32(f1_2, f2_2);
-                    sum2 = vmlaq_f32(sum2, diff2, diff2);
+                    sum0 = vmlaq_f32(sum0, diff2, diff2);
 
                     float32x4_t f1_3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v1_1)));
                     float32x4_t f2_3 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(v2_1)));
                     f1_3 = vmulq_f32(f1_3, v_scale1);
                     f2_3 = vmulq_f32(f2_3, v_scale2);
                     float32x4_t diff3 = vsubq_f32(f1_3, f2_3);
-                    sum3 = vmlaq_f32(sum3, diff3, diff3);
+                    sum0 = vmlaq_f32(sum0, diff3, diff3);
                 }
-
-                sum0 = vaddq_f32(sum0, sum1);
-                sum2 = vaddq_f32(sum2, sum3);
-                sum0 = vaddq_f32(sum0, sum2);
                 res = vaddvq_f32(sum0);
 #elif defined(USE_SVE2)
                 svfloat32_t sum0 = svdup_f32(0.0f);
@@ -711,8 +800,8 @@ namespace ndd {
                 const auto* params = static_cast<const hnswlib::DistParams*>(qty_ptr);
                 size_t qty = params->dim;
 
-                float scale1 = extract_inv_scale((const uint8_t*)pVect1, qty);
-                float scale2 = extract_inv_scale((const uint8_t*)pVect2, qty);
+                float scale1 = extract_scale((const uint8_t*)pVect1, qty);
+                float scale2 = extract_scale((const uint8_t*)pVect2, qty);
 
                 int64_t sum = 0;
                 size_t i = 0;
@@ -761,6 +850,41 @@ namespace ndd {
 #elif defined(USE_NEON)
                 int64x2_t sum_vec0 = vdupq_n_s64(0);
                 int64x2_t sum_vec1 = vdupq_n_s64(0);
+                int64x2_t sum_vec2 = vdupq_n_s64(0);
+                int64x2_t sum_vec3 = vdupq_n_s64(0);
+
+                size_t qty32 = qty / 32;
+                for(; i < qty32 * 32; i += 32) {
+                    // Block 0 (First 16 elements)
+                    int16x8_t v1_0 = vld1q_s16(pVect1 + i);
+                    int16x8_t v2_0 = vld1q_s16(pVect2 + i);
+                    int32x4_t prod0_lo = vmull_s16(vget_low_s16(v1_0), vget_low_s16(v2_0));
+                    int32x4_t prod0_hi = vmull_s16(vget_high_s16(v1_0), vget_high_s16(v2_0));
+                    sum_vec0 = vpadalq_s32(sum_vec0, prod0_lo);
+                    sum_vec0 = vpadalq_s32(sum_vec0, prod0_hi);
+
+                    int16x8_t v1_1 = vld1q_s16(pVect1 + i + 8);
+                    int16x8_t v2_1 = vld1q_s16(pVect2 + i + 8);
+                    int32x4_t prod1_lo = vmull_s16(vget_low_s16(v1_1), vget_low_s16(v2_1));
+                    int32x4_t prod1_hi = vmull_s16(vget_high_s16(v1_1), vget_high_s16(v2_1));
+                    sum_vec1 = vpadalq_s32(sum_vec1, prod1_lo);
+                    sum_vec1 = vpadalq_s32(sum_vec1, prod1_hi);
+
+                    // Block 1 (Next 16 elements)
+                    int16x8_t v1_2 = vld1q_s16(pVect1 + i + 16);
+                    int16x8_t v2_2 = vld1q_s16(pVect2 + i + 16);
+                    int32x4_t prod2_lo = vmull_s16(vget_low_s16(v1_2), vget_low_s16(v2_2));
+                    int32x4_t prod2_hi = vmull_s16(vget_high_s16(v1_2), vget_high_s16(v2_2));
+                    sum_vec2 = vpadalq_s32(sum_vec2, prod2_lo);
+                    sum_vec2 = vpadalq_s32(sum_vec2, prod2_hi);
+
+                    int16x8_t v1_3 = vld1q_s16(pVect1 + i + 24);
+                    int16x8_t v2_3 = vld1q_s16(pVect2 + i + 24);
+                    int32x4_t prod3_lo = vmull_s16(vget_low_s16(v1_3), vget_low_s16(v2_3));
+                    int32x4_t prod3_hi = vmull_s16(vget_high_s16(v1_3), vget_high_s16(v2_3));
+                    sum_vec3 = vpadalq_s32(sum_vec3, prod3_lo);
+                    sum_vec3 = vpadalq_s32(sum_vec3, prod3_hi);
+                }
 
                 size_t qty16 = qty / 16;
                 for(; i < qty16 * 16; i += 16) {
@@ -769,13 +893,11 @@ namespace ndd {
                     int16x8_t v1_1 = vld1q_s16(pVect1 + i + 8);
                     int16x8_t v2_1 = vld1q_s16(pVect2 + i + 8);
 
-                    // Multiply -> 32-bit
                     int32x4_t prod0_lo = vmull_s16(vget_low_s16(v1_0), vget_low_s16(v2_0));
                     int32x4_t prod0_hi = vmull_s16(vget_high_s16(v1_0), vget_high_s16(v2_0));
                     int32x4_t prod1_lo = vmull_s16(vget_low_s16(v1_1), vget_low_s16(v2_1));
                     int32x4_t prod1_hi = vmull_s16(vget_high_s16(v1_1), vget_high_s16(v2_1));
 
-                    // Accumulate into 64-bit
                     sum_vec0 = vpadalq_s32(sum_vec0, prod0_lo);
                     sum_vec0 = vpadalq_s32(sum_vec0, prod0_hi);
                     sum_vec1 = vpadalq_s32(sum_vec1, prod1_lo);
@@ -783,6 +905,8 @@ namespace ndd {
                 }
 
                 sum_vec0 = vaddq_s64(sum_vec0, sum_vec1);
+                sum_vec2 = vaddq_s64(sum_vec2, sum_vec3);
+                sum_vec0 = vaddq_s64(sum_vec0, sum_vec2);
                 sum = vgetq_lane_s64(sum_vec0, 0) + vgetq_lane_s64(sum_vec0, 1);
 #elif defined(USE_SVE2)
                 uint64_t num_elements = svcnth();
@@ -854,7 +978,7 @@ namespace ndd {
                     sum += static_cast<int64_t>(pVect1[i]) * static_cast<int64_t>(pVect2[i]);
                 }
 
-                return static_cast<float>(sum) * scale1 * scale2;
+                return (static_cast<float>(sum) * scale1) * scale2;
             }
 
             static float
@@ -875,12 +999,12 @@ namespace ndd {
             static std::vector<uint8_t> quantize_to_int8(const void* in, size_t dim) {
                 const int16_t* in_data = static_cast<const int16_t*>(in);
                 // Get scale
-                float inv_scale = extract_inv_scale(reinterpret_cast<const uint8_t*>(in), dim);
+                float scale = extract_scale(reinterpret_cast<const uint8_t*>(in), dim);
 
-                // Target: value = stored_8 * new_inv_scale
+                // Target: value = stored_8 * new_scale
                 // We set: stored_8 = stored_16 / 256
-                // new_inv_scale = inv_scale * 256.0f
-                float new_inv_scale = inv_scale * 256.0f;
+                // new_scale = scale * 256.0f
+                float new_scale = scale * 256.0f;
 
                 size_t out_size = dim * sizeof(int8_t) + sizeof(float);
                 std::vector<uint8_t> out_vec(out_size);
@@ -923,7 +1047,7 @@ namespace ndd {
                 for(; i < dim; ++i) {
                     out_data[i] = static_cast<int8_t>(in_data[i] >> 8);
                 }
-                std::memcpy(out_data + dim, &new_inv_scale, sizeof(float));
+                std::memcpy(out_data + dim, &new_scale, sizeof(float));
                 return out_vec;
             }
 
@@ -946,7 +1070,7 @@ namespace ndd {
                 d.dequantize = &int16d::dequantize;
                 d.quantize_to_int8 = &int16d::quantize_to_int8;
                 d.get_storage_size = &int16d::get_storage_size;
-                d.extract_inv_scale = &int16d::extract_inv_scale;
+                d.extract_scale = &int16d::extract_scale;
                 return d;
             }
         };
