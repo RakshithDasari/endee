@@ -550,20 +550,22 @@ public:
     }
 
     // Helper method to validate backup names
-    void validateBackupName(const std::string& backup_name) const {
+    std::pair<bool, std::string> validateBackupName(const std::string& backup_name) const {
         if(backup_name.empty()) {
-            throw std::runtime_error("Backup name cannot be empty");
+            return std::make_pair(false, "Backup name cannot be empty");
         }
 
         // Check length limit (most filesystems limit to 255 chars)
         if(backup_name.length() > MAX_BACKUP_NAME_LENGTH) {
-            throw std::runtime_error("Backup name too long (max "
-                                     + std::to_string(MAX_BACKUP_NAME_LENGTH) + " characters)");
+            return std::make_pair(false,
+                                  "Backup name too long (max "
+                                          + std::to_string(MAX_BACKUP_NAME_LENGTH)
+                                          + " characters)");
         }
 
         // Check for reserved names
         if(backup_name == "." || backup_name == "..") {
-            throw std::runtime_error("Invalid backup name: cannot be '.' or '..'");
+            return std::make_pair(false, "Invalid backup name: cannot be '.' or '..'");
         }
 
         // Check for reserved/problematic names (cross-platform)
@@ -578,7 +580,7 @@ public:
            || lower_name == "lpt1" || lower_name == "lpt2" || lower_name == "lpt3"
            || lower_name == "lpt4" || lower_name == "lpt5" || lower_name == "lpt6"
            || lower_name == "lpt7" || lower_name == "lpt8" || lower_name == "lpt9") {
-            throw std::runtime_error("Invalid backup name: reserved system name (Windows)");
+            return std::make_pair(false, "Invalid backup name: reserved system name (Windows)");
         }
 
         // Unix/Linux/macOS device names (could cause confusion)
@@ -589,29 +591,30 @@ public:
            || lower_name == "stderr" || lower_name == "tty" || lower_name == "console"
            || lower_name == "kmem" || lower_name == "mem" || lower_name == "core"
            || lower_name == "full" || lower_name == "ptmx") {
-            throw std::runtime_error("Invalid backup name: device/system name (Unix/Linux)");
+            return std::make_pair(false, "Invalid backup name: device/system name (Unix/Linux)");
         }
 
         // Prevent hidden files (names starting with dot)
         if(backup_name[0] == '.') {
-            throw std::runtime_error("Invalid backup name: cannot start with '.'");
+            return std::make_pair(false, "Invalid backup name: cannot start with '.'");
         }
 
         // Prevent trailing dots or spaces (Windows issue)
         char last_char = backup_name[backup_name.length() - 1];
         if(last_char == '.' || last_char == ' ') {
-            throw std::runtime_error("Invalid backup name: cannot end with '.' or space");
+            return std::make_pair(false, "Invalid backup name: cannot end with '.' or space");
         }
 
         // Prevent leading/trailing whitespace
         if(std::isspace(backup_name[0]) || std::isspace(last_char)) {
-            throw std::runtime_error("Invalid backup name: cannot start or end with whitespace");
+            return std::make_pair(false,
+                                  "Invalid backup name: cannot start or end with whitespace");
         }
 
         // Check for path traversal attacks
         if(backup_name.find("..") != std::string::npos || backup_name.find('/') != std::string::npos
            || backup_name.find('\\') != std::string::npos) {
-            throw std::runtime_error("Invalid backup name: cannot contain '..', '/', or '\\'");
+            return std::make_pair(false, "Invalid backup name: cannot contain '..', '/', or '\\'");
         }
 
         // Check for dangerous characters (null bytes, control chars, colons, etc.)
@@ -620,33 +623,41 @@ public:
 
             // Check for null bytes
             if(c == '\0') {
-                throw std::runtime_error("Invalid backup name: cannot contain null bytes");
+                std::cout << "Invalid backup name: cannot contain null bytes at " << i << std::endl;
+                return std::make_pair(false, "Invalid backup name: cannot contain null bytes");
             }
 
             // Check for control characters
             if(std::iscntrl(c)) {
-                throw std::runtime_error("Invalid backup name: cannot contain control characters");
+                return std::make_pair(false,
+                                      "Invalid backup name: cannot contain control characters");
             }
 
             // Check for dangerous characters
             if(c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|'
                || c == '&' || c == ';' || c == '$' || c == '`' || c == '\'' || c == '('
                || c == ')') {
-                throw std::runtime_error("Invalid backup name: contains forbidden characters");
+                return std::make_pair(false, "Invalid backup name: contains forbidden characters");
             }
 
             // Only allow alphanumeric, hyphens, underscores, dots, and spaces
             if(!std::isalnum(c) && c != '-' && c != '_' && c != '.' && c != ' ') {
-                throw std::runtime_error("Invalid backup name: only alphanumeric, hyphens, "
-                                         "underscores, dots, and spaces allowed");
+                return std::make_pair(false,
+                                      "Invalid backup name: only alphanumeric, hyphens, "
+                                      "underscores, dots, and spaces allowed");
             }
         }
+        return std::make_pair(true, "");
     }
 
     // Backup methods
-    void createBackup(const std::string& index_id, const std::string& backup_name) {
+    std::pair<bool, std::string> createBackup(const std::string& index_id,
+                                              const std::string& backup_name) {
         // 1. Validate backup name
-        validateBackupName(backup_name);
+        std::pair<bool, std::string> result = validateBackupName(backup_name);
+        if(!result.first) {
+            return result;
+        }
 
         // 2. Parse user and index name
         std::string user_id, index_name;
@@ -655,7 +666,7 @@ public:
             user_id = index_id.substr(0, pos);
             index_name = index_id.substr(pos + 1);
         } else {
-            throw std::runtime_error("Invalid index ID format");
+            return {false, "Invalid index ID format"};
         }
 
         // 3. Get index entry and lock
@@ -672,7 +683,7 @@ public:
         std::string source_dir = data_dir_ + "/" + index_id;
 
         if(std::filesystem::exists(backup_tar)) {
-            throw std::runtime_error("Backup already exists: " + backup_name);
+            return {false, "Backup already exists: " + backup_name};
         }
 
         // 6. Copy files to temporary directory
@@ -711,13 +722,14 @@ public:
         if(!ndd::ArchiveUtils::createTarGz(backup_dir, backup_tar, error_msg)) {
             // Clean up on failure
             std::filesystem::remove_all(backup_dir);
-            throw std::runtime_error("Failed to create compressed backup archive: " + error_msg);
+            return {false, "Failed to create compressed backup archive: " + error_msg};
         }
 
         // 8. Remove the temporary uncompressed directory
         std::filesystem::remove_all(backup_dir);
 
         LOG_INFO("Created compressed backup: " << backup_tar);
+        return {true, ""};
     }
 
     std::vector<std::string> listBackups() {
@@ -743,43 +755,57 @@ public:
         return backups;
     }
 
-    void restoreBackup(const std::string& backup_name, const std::string& target_index_name) {
+    std::pair<bool, std::string> restoreBackup(const std::string& backup_name,
+                                               const std::string& target_index_name) {
         // 1. Validate backup name
-        validateBackupName(backup_name);
+        std::pair<bool, std::string> result = validateBackupName(backup_name);
+        if(!result.first) {
+            return result;
+        }
 
         // Use default username for single-user system
         std::string user_id = settings::DEFAULT_USERNAME;
         std::string backup_dir_root = data_dir_ + "/backups";
         std::string backup_tar = backup_dir_root + "/" + backup_name + ".tar.gz";
-        std::string backup_dir = backup_dir_root + "/" + backup_name;
+        std::string backup_extract_dir = backup_dir_root + "/" + backup_name;
         std::string target_index_id = user_id + "/" + target_index_name;
         std::string target_dir = data_dir_ + "/" + target_index_id;
 
         // 2. Validation - check for tar.gz file
         if(!std::filesystem::exists(backup_tar)) {
-            throw std::runtime_error("Backup not found: " + backup_name);
+            return {false, "Backup not found: " + backup_name};
         }
         if(metadata_manager_->getMetadata(target_index_id).has_value()) {
-            throw std::runtime_error("Target index already exists");
+            return {false, "Target index already exists"};
         }
 
         // 3. Extract tar.gz to temporary directory using libarchive
         std::string error_msg;
-        if(!ndd::ArchiveUtils::extractTarGz(backup_tar, backup_dir_root, error_msg)) {
-            throw std::runtime_error("Failed to extract backup archive: " + error_msg);
+        if(!ndd::ArchiveUtils::extractTarGz(backup_tar, backup_extract_dir, error_msg)) {
+            return {false, "Failed to extract backup archive: " + error_msg};
         }
 
-        // Ensure backup directory was extracted
-        if(!std::filesystem::exists(backup_dir)) {
-            throw std::runtime_error("Backup extraction failed - directory not found");
+        // check if any folder is present in backup_extract_dir
+        std::vector<std::string> folders;
+        for(const auto& entry : std::filesystem::directory_iterator(backup_extract_dir)) {
+            if(entry.is_directory()) {
+                folders.push_back(entry.path().string());
+            }
         }
+
+        if(folders.size() != 1) {
+            std::filesystem::remove_all(backup_extract_dir);
+            return {false, "Backup extraction failed - directory not found"};
+        }
+
+        std::string backup_dir = folders[0];
 
         try {
             // 3. Read metadata
             std::ifstream f(backup_dir + "/metadata.json");
             if(!f.good()) {
-                std::filesystem::remove_all(backup_dir);
-                throw std::runtime_error("Backup metadata missing");
+                std::filesystem::remove_all(backup_extract_dir);
+                return {false, "Backup metadata missing"};
             }
             nlohmann::json meta_json = nlohmann::json::parse(f);
 
@@ -810,29 +836,34 @@ public:
             metadata_manager_->storeMetadata(target_index_id, new_meta);
 
             // 6. Clean up extracted temporary directory
-            std::filesystem::remove_all(backup_dir);
+            std::filesystem::remove_all(backup_extract_dir);
 
             // 7. Load index
             loadIndex(target_index_id);
 
             LOG_INFO("Restored backup from compressed archive: " << backup_tar);
+            return {true, ""};
         } catch(const std::exception& e) {
             // Clean up on failure
-            std::filesystem::remove_all(backup_dir);
-            throw;
+            std::filesystem::remove_all(backup_extract_dir);
+            return {false, "Failed to restore backup: " + std::string(e.what())};
         }
     }
 
-    void deleteBackup(const std::string& backup_name) {
+    std::pair<bool, std::string> deleteBackup(const std::string& backup_name) {
         // Validate backup name
-        validateBackupName(backup_name);
+        std::pair<bool, std::string> result = validateBackupName(backup_name);
+        if(!result.first) {
+            return result;
+        }
 
         std::string backup_tar = data_dir_ + "/backups/" + backup_name + ".tar.gz";
         if(std::filesystem::exists(backup_tar)) {
             std::filesystem::remove(backup_tar);
             LOG_INFO("Deleted compressed backup: " << backup_tar);
+            return {true, ""};
         } else {
-            throw std::runtime_error("Backup not found");
+            return {false, "Backup not found"};
         }
     }
 
@@ -1434,10 +1465,6 @@ public:
                 entry.vector_storage->deleteFilter(numeric_id, meta.filter);
                 // Mark as deleted in HNSW index
                 entry.alg->markDelete(numeric_id);
-                // Delete from sparse storage if hybrid index
-                if(entry.sparse_storage) {
-                    entry.sparse_storage->delete_vector(numeric_id);
-                }
             }
             // Add the list to write ahead log using IndexManager's method
             logDeletions(entry.index_id, numeric_ids);
