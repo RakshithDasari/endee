@@ -136,7 +136,7 @@ The output binary name depends on the SIMD flag used during compilation:
 
 ### Runtime Environment Variables
 
-Some enviroment variables **ndd** reads at runtime:
+Some environment variables **ndd** reads at runtime:
 
 * `NDD_DATA_DIR`: Defines the data directory
 * `NDD_AUTH_TOKEN`: Optional authentication token (see below)
@@ -182,7 +182,52 @@ NDD_DATA_DIR=./data ./build/ndd-avx2
 ```
 
 ---
-## 5. Docker Deployment
+
+## 5. Using the run.sh helper script
+
+We provide a `run.sh` script to simplify running the server. It automatically detects the built binary and uses `ndd_data_dir=./data` by default.
+
+First, ensure the script is executable:
+
+```bash
+chmod +x ./run.sh
+```
+
+Then run the script:
+
+```bash
+./run.sh
+```
+
+### Options
+
+You can override the defaults using arguments:
+
+*   `ndd_data_dir=DIR`: Set the data directory.
+*   `binary_file=FILE`: Set the binary file to run.
+
+### Examples
+
+**Run with custom data directory:**
+
+```bash
+./run.sh ndd_data_dir=./my_data
+```
+
+**Run specific binary:**
+
+```bash
+./run.sh binary_file=./build/ndd-avx2
+```
+
+**Show help:**
+
+```bash
+./run.sh --help
+```
+
+---
+## 6. Docker Deployment
 
 We provide a Dockerfile for easy containerization. This ensures a consistent runtime environment and simplifies the deployment process across various platforms.
 
@@ -221,7 +266,7 @@ You can also use `docker-compose` to run the service.
 
 ---
 
-## 6. Running Docker container from registry
+## 7. Running Docker container from registry
 
 You can run Endee directly using the pre-built image from Docker Hub without building locally.
 
