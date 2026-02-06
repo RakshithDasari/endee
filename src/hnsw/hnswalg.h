@@ -87,16 +87,26 @@ namespace hnswlib {
                       << data_size_ << ", dimension: " << dimension_
                       << ", quant_level: " << static_cast<int>(quant_level_));
 
-#ifndef DISABLE_HYBRID_QUANTIZATION
-            // Create INT8 space for upper layers
-            space_int8_ = std::unique_ptr<SpaceInterface<float>>(createSpace<float>(
-                    space_type_, dimension_, ndd::quant::QuantizationLevel::INT8));
-            data_size_int8_ = space_int8_->get_data_size();
-            fstSimFuncInt8_ = space_int8_->get_sim_func();
-            dist_func_param_int8_ = space_int8_->get_dist_func_param();
-            LOG_DEBUG("Space also initialized (Hybrid Quantization) with data size: "
-                      << data_size_int8_);
-#endif  //DISABLE_HYBRID_QUANTIZATION
+            // Initialize upper layer space
+            bool use_hybrid = true;
+            if(quant_level_ == ndd::quant::QuantizationLevel::BINARY) {
+                use_hybrid = false;
+            }
+
+            if(use_hybrid) {
+                space_upper_ = std::unique_ptr<SpaceInterface<float>>(createSpace<float>(
+                        space_type_, dimension_, ndd::quant::QuantizationLevel::INT8));
+                LOG_DEBUG("Upper layer initialized with Hybrid Quantization (INT8)");
+            } else {
+                space_upper_ = std::unique_ptr<SpaceInterface<float>>(
+                        createSpace<float>(space_type_, dimension_, quant_level_));
+                LOG_DEBUG("Upper layer initialized with same space as base layer");
+            }
+
+            data_size_upper_ = space_upper_->get_data_size();
+            fstSimFuncUpper_ = space_upper_->get_sim_func();
+            dist_func_param_upper_ = space_upper_->get_dist_func_param();
+            LOG_DEBUG("Upper layer data size: " << data_size_upper_);
 
             // M_ cannot be more than settings::MAX_M
             if(M_ > settings::MAX_M) {
@@ -174,24 +184,24 @@ namespace hnswlib {
             // Approximate level > 0 count
             size_t upper_layer_estimate = maxElements_ / M_;
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-            // Typical Quantization
-            size += upper_layer_estimate * (data_size_ + sizeof(levelInt) + sizeLinksUpperLayers_);
-#else
-            // int 8 Quantization for upper layers
+            // Upper layer calculation using runtime data size
             size += upper_layer_estimate
-                    * (data_size_int8_ + sizeof(levelInt) + sizeLinksUpperLayers_);
-#endif  //DISABLE_HYBRID_QUANTIZATION
+                    * (data_size_upper_ + sizeof(levelInt) + sizeLinksUpperLayers_);
 
             return size / GB;  // GB
         }
 
-        // Helper to quantize to INT8 (check DISABLE_HYBRID_QUANTIZATION)
-        std::vector<uint8_t> quantizeToInt8(const void* datapoint) {
-            // Use direct conversion from current level to INT8
-            // This avoids double allocation and conversion (Base -> Float -> Int8)
+        // Helper to get data representation for upper layers
+        std::vector<uint8_t> getUpperLayerRepresentation(const void* datapoint) {
+            if(data_size_upper_ == data_size_) {
+                // If sizes match, just copy (No hybrid quantization or Same Space)
+                std::vector<uint8_t> res(data_size_);
+                memcpy(res.data(), datapoint, data_size_);
+                return res;
+            }
+
+            // Hybrid quantization enabled (INT8)
             auto dispatch = ndd::quant::get_quantizer_dispatch(quant_level_);
-            // datapoint is the raw stored format for the base layer
             return dispatch.quantize_to_int8(datapoint, dimension_);
         }
 
@@ -213,18 +223,11 @@ namespace hnswlib {
             idhInt currObj = entryPoint_;
             dist_t curSim;
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-            std::vector<uint8_t> ep_vector(data_size_);
-            if(!getDataByInternalId(currObj, maxLevel_, ep_vector.data())) {
-                return result;
-            }
-            curSim = fstSimFunc_(query_data, ep_vector.data(), dist_func_param_);
-            std::vector<uint8_t> candidate_vector(data_size_);
-#else
-            // Only convert to INT8 if we have upper layers to traverse
-            std::vector<uint8_t> query_data_int8;
+            // Prepare query data for upper layers
+            std::vector<uint8_t> query_data_upper;
             if(maxLevel_ > 0) {
-                query_data_int8 = const_cast<HierarchicalNSW*>(this)->quantizeToInt8(query_data);
+                query_data_upper =
+                        const_cast<HierarchicalNSW*>(this)->getUpperLayerRepresentation(query_data);
 
                 // Use direct pointer for upper layers
                 const uint8_t* ep_data = getUpperLayerDataPtr(currObj);
@@ -232,9 +235,9 @@ namespace hnswlib {
                     return result;
                 }
 
-                curSim = fstSimFuncInt8_(query_data_int8.data(), ep_data, dist_func_param_int8_);
+                curSim = fstSimFuncUpper_(
+                        query_data_upper.data(), ep_data, dist_func_param_upper_);
             }
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
             dist_t s;
             // Upper layer traversal - greedy search
@@ -258,19 +261,12 @@ namespace hnswlib {
                             continue;
                         }
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                        if(!getDataByInternalId(candidate, level, candidate_vector.data())) {
-                            continue;
-                        }
-                        s = fstSimFunc_(query_data, candidate_vector.data(), dist_func_param_);
-#else
                         const uint8_t* candidate_data = getUpperLayerDataPtr(candidate);
                         if(!candidate_data) {
                             continue;
                         }
-                        s = fstSimFuncInt8_(
-                                query_data_int8.data(), candidate_data, dist_func_param_int8_);
-#endif  //DISABLE_HYBRID_QUANTIZATION
+                        s = fstSimFuncUpper_(
+                                query_data_upper.data(), candidate_data, dist_func_param_upper_);
 
                         if(s > curSim) {
                             curSim = s;
@@ -343,14 +339,9 @@ namespace hnswlib {
                     continue;
                 }
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                level = *reinterpret_cast<levelInt*>(dataUpperLayer_[i].get() + data_size_);
-                total_size = data_size_ + sizeof(levelInt) + level * sizeLinksUpperLayers_;
-#else
-                // Use data_size_int8_
-                level = *reinterpret_cast<levelInt*>(dataUpperLayer_[i].get() + data_size_int8_);
-                total_size = data_size_int8_ + sizeof(levelInt) + level * sizeLinksUpperLayers_;
-#endif  //DISABLE_HYBRID_QUANTIZATION
+                // Use data_size_upper_
+                level = *reinterpret_cast<levelInt*>(dataUpperLayer_[i].get() + data_size_upper_);
+                total_size = data_size_upper_ + sizeof(levelInt) + level * sizeLinksUpperLayers_;
 
                 writeBinaryPOD(output, static_cast<idhInt>(i));  // write ID
                 output.write(reinterpret_cast<char*>(dataUpperLayer_[i].get()),
@@ -419,14 +410,23 @@ namespace hnswlib {
             fstSimFunc_ = space_->get_sim_func();
             dist_func_param_ = space_->get_dist_func_param();
 
-#ifndef DISABLE_HYBRID_QUANTIZATION
-            // Create INT8 space for upper layers
-            space_int8_ = std::unique_ptr<SpaceInterface<float>>(createSpace<float>(
-                    space_type_, dimension_, ndd::quant::QuantizationLevel::INT8));
-            data_size_int8_ = space_int8_->get_data_size();
-            fstSimFuncInt8_ = space_int8_->get_sim_func();
-            dist_func_param_int8_ = space_int8_->get_dist_func_param();
-#endif  //DISABLE_HYBRID_QUANTIZATION
+            // Initialize upper layer space
+            bool use_hybrid = true;
+            if(quant_level_ == ndd::quant::QuantizationLevel::BINARY) {
+                use_hybrid = false;
+            }
+
+            if(use_hybrid) {
+                space_upper_ = std::unique_ptr<SpaceInterface<float>>(createSpace<float>(
+                        space_type_, dimension_, ndd::quant::QuantizationLevel::INT8));
+            } else {
+                space_upper_ = std::unique_ptr<SpaceInterface<float>>(
+                        createSpace<float>(space_type_, dimension_, quant_level_));
+            }
+
+            data_size_upper_ = space_upper_->get_data_size();
+            fstSimFuncUpper_ = space_upper_->get_sim_func();
+            dist_func_param_upper_ = space_upper_->get_dist_func_param();
 
             // Allocate memory and load level 0 data
             dataBaseLayer_ = (char*)malloc(maxElements_ * sizeDataAtBaseLayer_);
@@ -468,13 +468,8 @@ namespace hnswlib {
                 }
 
                 size_t header_size;
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                // Step 1: Read vector + level header (data_size_ + sizeof(levelInt))
-                header_size = data_size_ + sizeof(levelInt);
-#else
-                // Step 1: Read vector + level header (data_size_int8_ + sizeof(levelInt))
-                header_size = data_size_int8_ + sizeof(levelInt);
-#endif  //DISABLE_HYBRID_QUANTIZATION
+                // Step 1: Read vector + level header
+                header_size = data_size_upper_ + sizeof(levelInt);
 
                 std::vector<uint8_t> header_buf(header_size);
                 input.read(reinterpret_cast<char*>(header_buf.data()), header_size);
@@ -483,11 +478,7 @@ namespace hnswlib {
                 }
 
                 levelInt level;
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                level = *reinterpret_cast<levelInt*>(header_buf.data() + data_size_);
-#else
-                level = *reinterpret_cast<levelInt*>(header_buf.data() + data_size_int8_);
-#endif  //DISABLE_HYBRID_QUANTIZATION
+                level = *reinterpret_cast<levelInt*>(header_buf.data() + data_size_upper_);
 
                 size_t total_size = header_size + level * sizeLinksUpperLayers_;
 
@@ -526,10 +517,8 @@ namespace hnswlib {
         template <bool is_new> void addPoint(const void* datapoint, idInt label) {
             LOG_TIME("addPoint");
 
-#ifndef DISABLE_HYBRID_QUANTIZATION
-            // Generate INT8 representation for upper layers
-            std::vector<uint8_t> datapoint_int8 = quantizeToInt8(datapoint);
-#endif  //DISABLE_HYBRID_QUANTIZATION
+            // Generate upper layer representation
+            std::vector<uint8_t> datapoint_upper = getUpperLayerRepresentation(datapoint);
 
             //std::shared_lock<std::shared_mutex> lock(index_lock_);
             idhInt cur_c = 0;
@@ -583,30 +572,17 @@ namespace hnswlib {
             size_t total_size;
             if(curLevel > 0) {
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                total_size = data_size_ + sizeof(levelInt) + curLevel * sizeLinksUpperLayers_;
-#else
-                total_size = data_size_int8_ + sizeof(levelInt) + curLevel * sizeLinksUpperLayers_;
-#endif  //DISABLE_HYBRID_QUANTIZATION
+                total_size = data_size_upper_ + sizeof(levelInt) + curLevel * sizeLinksUpperLayers_;
 
                 auto mem = std::make_unique<uint8_t[]>(total_size);
 
                 // copy vector
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                memcpy(mem.get(), datapoint, data_size_);
-                memcpy(mem.get() + data_size_, &curLevel, sizeof(levelInt));
+                memcpy(mem.get(), datapoint_upper.data(), data_size_upper_);
+                memcpy(mem.get() + data_size_upper_, &curLevel, sizeof(levelInt));
                 // zero initialize linklists
-                memset(mem.get() + data_size_ + sizeof(levelInt),
+                memset(mem.get() + data_size_upper_ + sizeof(levelInt),
                        0,
                        curLevel * sizeLinksUpperLayers_);
-#else
-                memcpy(mem.get(), datapoint_int8.data(), data_size_int8_);
-                memcpy(mem.get() + data_size_int8_, &curLevel, sizeof(levelInt));
-                // zero initialize linklists
-                memset(mem.get() + data_size_int8_ + sizeof(levelInt),
-                       0,
-                       curLevel * sizeLinksUpperLayers_);
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
                 dataUpperLayer_[cur_c] = std::move(mem);
             }
@@ -633,46 +609,25 @@ namespace hnswlib {
                         int size = getListCount((idhInt*)ll_cur);
                         idhInt* datal = (idhInt*)(ll_cur + 1);
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                        std::vector<uint8_t> curr_vec(data_size_);
-#else
-                        std::vector<uint8_t> curr_vec(data_size_int8_);
-#endif  //DISABLE_HYBRID_QUANTIZATION
-
+                        std::vector<uint8_t> curr_vec(data_size_upper_);
                         if(!getDataByInternalId(currObj, level, curr_vec.data())) {
                             continue;
                         }
 
-                        dist_t curr_sim;
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                        curr_sim = fstSimFunc_(datapoint, curr_vec.data(), dist_func_param_);
-#else
-                        curr_sim = fstSimFuncInt8_(
-                                datapoint_int8.data(), curr_vec.data(), dist_func_param_int8_);
-#endif  //DISABLE_HYBRID_QUANTIZATION
+                        dist_t curr_sim = fstSimFuncUpper_(datapoint_upper.data(),
+                                                           curr_vec.data(),
+                                                           dist_func_param_upper_);
 
                         for(int i = 0; i < size; i++) {
                             idhInt candidate_id = datal[i];
-                            if(candidate_id >= curElementsCount_) {
-                                continue;
-                            }
-
                             dist_t s;
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                            std::vector<uint8_t> candidate_vec(data_size_);
+                            std::vector<uint8_t> candidate_vec(data_size_upper_);
                             if(!getDataByInternalId(candidate_id, level, candidate_vec.data())) {
                                 continue;
                             }
-                            s = fstSimFunc_(datapoint, candidate_vec.data(), dist_func_param_);
-#else
-                            std::vector<uint8_t> candidate_vec(data_size_int8_);
-                            if(!getDataByInternalId(candidate_id, level, candidate_vec.data())) {
-                                continue;
-                            }
-                            s = fstSimFuncInt8_(datapoint_int8.data(),
-                                                candidate_vec.data(),
-                                                dist_func_param_int8_);
-#endif  //DISABLE_HYBRID_QUANTIZATION
+                            s = fstSimFuncUpper_(datapoint_upper.data(),
+                                                 candidate_vec.data(),
+                                                 dist_func_param_upper_);
 
                             if(s > curr_sim) {
                                 curr_sim = s;
@@ -682,21 +637,13 @@ namespace hnswlib {
                         }
                     }
                 }
-                // Connect at all levels from curLevel down to 0
+
+                // Add connections from curLevel down to 0
                 for(int level = std::min(curLevel, maxlevelcopy); level >= 0; level--) {
                     std::vector<std::pair<dist_t, idhInt>> sorted_candidates;
-
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                    if(deletedElementsCount_) {
-                        sorted_candidates = searchBaseLayer<true, true>(
-                                currObj, datapoint, level, efConstruction_);
-                    } else {  // No deleted elements
-                        sorted_candidates = searchBaseLayer<true, false>(
-                                currObj, datapoint, level, efConstruction_);
-                    }
-                    currObj = mutuallyConnectNewElement(datapoint, cur_c, sorted_candidates, level);
-#else
-                    const void* level_datapoint = (level == 0) ? datapoint : datapoint_int8.data();
+                    
+                    const void* level_datapoint = (level == 0) ? datapoint : datapoint_upper.data();
+                    
                     if(deletedElementsCount_) {
                         sorted_candidates = searchBaseLayer<true, true>(
                                 currObj, level_datapoint, level, efConstruction_);
@@ -706,25 +653,12 @@ namespace hnswlib {
                     }
                     currObj = mutuallyConnectNewElement(
                             level_datapoint, cur_c, sorted_candidates, level);
-#endif  //DISABLE_HYBRID_QUANTIZATION
                 }
 
-                // If this element has a higher level than the current max,
-                // update the max level and entry point
-                if(has_higher_level) {
-                    std::lock_guard<std::mutex> glock(global);
-                    maxLevel_ = curLevel;
-                    entryPoint_ = cur_c;
+                if (has_higher_level) {
+                   entryPoint_ = cur_c;
+                   maxLevel_ = curLevel;
                 }
-            } else {
-                // First element becomes enterpoint
-                entryPoint_ = 0;
-                maxLevel_ = curLevel;
-                // preload element in vector cache at its proper cache location
-                // if (curLevel == 0) {
-                // memcpy(dataBaseLayer_ + cur_c * sizeDataAtBaseLayer_ + sizeDataAtBaseLayer_ -
-                // data_size_, datapoint, data_size_);
-                // }
             }
         }
 
@@ -791,9 +725,7 @@ namespace hnswlib {
         uint64_t flags_{0};  //Not using flags now. We can use it in future for various options
         std::unique_ptr<SpaceInterface<dist_t>> space_;
 
-#ifndef DISABLE_HYBRID_QUANTIZATION
-        std::unique_ptr<SpaceInterface<dist_t>> space_int8_;
-#endif  //DISABLE_HYBRID_QUANTIZATION
+        std::unique_ptr<SpaceInterface<dist_t>> space_upper_;
 
         size_t dimension_;
 
@@ -834,11 +766,10 @@ namespace hnswlib {
         SIMFUNC<dist_t> fstSimFunc_;
         void* dist_func_param_{nullptr};
 
-#ifndef DISABLE_HYBRID_QUANTIZATION
-        size_t data_size_int8_{0};
-        SIMFUNC<dist_t> fstSimFuncInt8_;
-        void* dist_func_param_int8_{nullptr};
-#endif  //DISABLE_HYBRID_QUANTIZATION
+        // Unified upper layer data parameters
+        size_t data_size_upper_{0};
+        SIMFUNC<dist_t> fstSimFuncUpper_;
+        void* dist_func_param_upper_{nullptr};
 
         // Maps external label to internal id
         std::vector<idhInt> labelLookup_;
@@ -895,11 +826,7 @@ namespace hnswlib {
                 if(dataUpperLayer_[internal_id] == nullptr) {
                     return false;
                 }
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                memcpy(buffer, dataUpperLayer_[internal_id].get(), data_size_);
-#else
-                memcpy(buffer, dataUpperLayer_[internal_id].get(), data_size_int8_);
-#endif  //DISABLE_HYBRID_QUANTIZATION
+                memcpy(buffer, dataUpperLayer_[internal_id].get(), data_size_upper_);
                 return true;
             }
             return false;
@@ -916,13 +843,8 @@ namespace hnswlib {
             // int levels = getElementLevel(id);
             // if (level > levels) return nullptr;
             return reinterpret_cast<char*>(
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                    dataUpperLayer_[id].get() + data_size_ + sizeof(levelInt)
+                    dataUpperLayer_[id].get() + data_size_upper_ + sizeof(levelInt)
                     + (level - 1) * sizeLinksUpperLayers_
-#else
-                    dataUpperLayer_[id].get() + data_size_int8_ + sizeof(levelInt)
-                    + (level - 1) * sizeLinksUpperLayers_
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
             );
         }
@@ -948,11 +870,7 @@ namespace hnswlib {
             if(!dataUpperLayer_[id]) {
                 return 0;
             }
-#ifdef DISABLE_HYBRID_QUANTIZATION
-            return *reinterpret_cast<const levelInt*>(dataUpperLayer_[id].get() + data_size_);
-#else
-            return *reinterpret_cast<const levelInt*>(dataUpperLayer_[id].get() + data_size_int8_);
-#endif  //DISABLE_HYBRID_QUANTIZATION
+            return *reinterpret_cast<const levelInt*>(dataUpperLayer_[id].get() + data_size_upper_);
         }
 
         // This function is used to get the neighbors based on heuristic
@@ -969,29 +887,19 @@ namespace hnswlib {
             std::vector<std::pair<dist_t, idhInt>> result;
             result.reserve(M);
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-            std::vector<uint8_t> cand_vec(data_size_);
-            std::vector<uint8_t> selected_vec(data_size_);
-#else
-            // INT8 awareness
-            auto curSimFunc = (level == 0) ? fstSimFunc_ : fstSimFuncInt8_;
-            auto curDistParam = (level == 0) ? dist_func_param_ : dist_func_param_int8_;
-            size_t curDataSize = (level == 0) ? data_size_ : data_size_int8_;
+            // Generic awareness
+            auto curSimFunc = (level == 0) ? fstSimFunc_ : fstSimFuncUpper_;
+            auto curDistParam = (level == 0) ? dist_func_param_ : dist_func_param_upper_;
+            size_t curDataSize = (level == 0) ? data_size_ : data_size_upper_;
 
             std::vector<uint8_t> cand_buf(curDataSize);      // Only used for level 0
             std::vector<uint8_t> selected_buf(curDataSize);  // Only used for level 0
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
             for(const auto& candidate : candidates_sorted) {
                 if(result.size() == M) {
                     break;
                 }
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                if(!getDataByInternalId(candidate.second, level, cand_vec.data())) {
-                    continue;
-                }
-#else
                 const void* cand_vec = nullptr;
                 if(level == 0) {
                     if(getDataByInternalId(candidate.second, level, cand_buf.data())) {
@@ -1004,18 +912,10 @@ namespace hnswlib {
                 if(!cand_vec) {
                     continue;
                 }
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
                 bool good = true;
                 dist_t sim;
                 for(const auto& selected : result) {
-
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                    if(!getDataByInternalId(selected.second, level, selected_vec.data())) {
-                        continue;
-                    }
-                    sim = fstSimFunc_(selected_vec.data(), cand_vec.data(), dist_func_param_);
-#else
                     const void* selected_vec_ptr = nullptr;
                     if(level == 0) {
                         if(getDataByInternalId(selected.second, level, selected_buf.data())) {
@@ -1030,7 +930,6 @@ namespace hnswlib {
                     }
 
                     sim = curSimFunc(selected_vec_ptr, cand_vec, curDistParam);
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
                     if(sim > candidate.first) {
                         good = false;
@@ -1058,20 +957,14 @@ namespace hnswlib {
             size_t curMaxM = level ? maxM_ : maxM0_;
             size_t curM = level ? M_ : M0_;
 
-#ifndef DISABLE_HYBRID_QUANTIZATION
-            // INT8 awareness
-            auto curSimFunc = (level == 0) ? fstSimFunc_ : fstSimFuncInt8_;
-            auto curDistParam = (level == 0) ? dist_func_param_ : dist_func_param_int8_;
-            size_t curDataSize = (level == 0) ? data_size_ : data_size_int8_;
-#endif  //DISABLE_HYBRID_QUANTIZATION
+            // Generic awareness
+            auto curSimFunc = (level == 0) ? fstSimFunc_ : fstSimFuncUpper_;
+            auto curDistParam = (level == 0) ? dist_func_param_ : dist_func_param_upper_;
+            size_t curDataSize = (level == 0) ? data_size_ : data_size_upper_;
 
-            // Step 1: Heuristic pruning
-            const auto& selected = getNeighborsByHeuristic2(sorted_candidates, curM, level);
-
-            if(selected.empty()) {
-                // If no candidates selected, just return current entry point or invalid
-                // This can happen if the graph is empty or disconnected
-                return 0;  // Or better handling
+            auto selected = getNeighborsByHeuristic2(sorted_candidates, curM, level);
+            if(selected.empty()) {  // the graph is empty or disconnected
+                return 0;           // Or better handling
             }
 
             idhInt next_closest_entry_point = selected[0].second;
@@ -1090,13 +983,8 @@ namespace hnswlib {
             }
 
             // Step 3: Add cur_c to neighbors' lists
-#ifdef DISABLE_HYBRID_QUANTIZATION
-            std::vector<uint8_t> neighbor_vec(data_size_);
-            std::vector<uint8_t> data_vec(data_size_);
-#else
             std::vector<uint8_t> neighbor_buf(curDataSize);  // Used for level 0
             std::vector<uint8_t> data_buf(curDataSize);      // Used for level 0
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
             for(const auto& p : selected) {
                 idhInt neighbor = p.second;
@@ -1118,11 +1006,6 @@ namespace hnswlib {
                     data[sz] = cur_c;
                     setListCount(ll_other, sz + 1);
                 } else {
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                    if(!getDataByInternalId(neighbor, level, neighbor_vec.data())) {
-                        continue;
-                    }
-#else
                     const void* neighbor_data = nullptr;
                     if(level == 0) {
                         if(getDataByInternalId(neighbor, level, neighbor_buf.data())) {
@@ -1135,27 +1018,15 @@ namespace hnswlib {
                     if(!neighbor_data) {
                         continue;
                     }
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
                     std::vector<std::pair<dist_t, idhInt>> all_candidates;
                     all_candidates.reserve(sz + 1);
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                    all_candidates.emplace_back(
-                            fstSimFunc_(neighbor_vec.data(), data_point, dist_func_param_), cur_c);
-#else
                     all_candidates.emplace_back(curSimFunc(neighbor_data, data_point, curDistParam),
                                                 cur_c);
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
                     for(size_t j = 0; j < sz; j++) {
                         dist_t sim;
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                        if(!getDataByInternalId(data[j], level, data_vec.data())) {
-                            continue;
-                        }
-                        sim = fstSimFunc_(neighbor_vec.data(), data_vec.data(), dist_func_param_);
-#else
                         const void* other_neighbor_data = nullptr;
                         if(level == 0) {
                             if(getDataByInternalId(data[j], level, data_buf.data())) {
@@ -1169,7 +1040,6 @@ namespace hnswlib {
                         }
 
                         sim = curSimFunc(neighbor_data, other_neighbor_data, curDistParam);
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
                         all_candidates.emplace_back(sim, data[j]);
                     }
@@ -1201,26 +1071,18 @@ namespace hnswlib {
             max_heap_pq candidate_set;
             min_heap_pq top_candidates;
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-            std::vector<uint8_t> buffer(data_size_);
-#else
-            // INT8 awareness
-            auto curSimFunc = (layer == 0) ? fstSimFunc_ : fstSimFuncInt8_;
-            auto curDistParam = (layer == 0) ? dist_func_param_ : dist_func_param_int8_;
-            size_t curDataSize = (layer == 0) ? data_size_ : data_size_int8_;
+            // Generic awareness
+            auto curSimFunc = (layer == 0) ? fstSimFunc_ : fstSimFuncUpper_;
+            auto curDistParam = (layer == 0) ? dist_func_param_ : dist_func_param_upper_;
+            size_t curDataSize = (layer == 0) ? data_size_ : data_size_upper_;
             std::vector<uint8_t> buffer;
             if(layer == 0) {
                 buffer.resize(curDataSize);
             }
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
             dist_t lowerBound;
             if(!has_deletions || !isMarkedDeleted(ep_id)) {
 
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                if(getDataByInternalId(ep_id, layer, buffer.data())) {
-                    dist_t sim = fstSimFunc_(data_point, buffer.data(), dist_func_param_);
-#else
                 const void* vec_data = nullptr;
                 if(layer == 0) {
                     if(getDataByInternalId(ep_id, layer, buffer.data())) {
@@ -1232,7 +1094,6 @@ namespace hnswlib {
 
                 if(vec_data) {
                     dist_t sim = curSimFunc(data_point, vec_data, curDistParam);
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
                     top_candidates.emplace(sim, ep_id);
                     candidate_set.emplace(sim, ep_id);
@@ -1246,6 +1107,7 @@ namespace hnswlib {
                 lowerBound = std::numeric_limits<dist_t>::lowest();
                 candidate_set.emplace(lowerBound, ep_id);
             }
+
             visited_array[ep_id] = visited_array_tag;
             int below_threshold_count = 0;
             int max_below_threshold = is_insert ? settings::EARLY_EXIT_BUFFER_INSERT
@@ -1287,12 +1149,6 @@ namespace hnswlib {
                     }
 
                     dist_t sim;
-#ifdef DISABLE_HYBRID_QUANTIZATION
-                    if(!getDataByInternalId(candidate_id, layer, buffer.data())) {
-                        continue;
-                    }
-                    sim = fstSimFunc_(data_point, buffer.data(), dist_func_param_);
-#else
                     const void* neighbor_data = nullptr;
                     if(layer == 0) {
                         if(getDataByInternalId(candidate_id, layer, buffer.data())) {
@@ -1307,7 +1163,6 @@ namespace hnswlib {
                     }
 
                     sim = curSimFunc(data_point, neighbor_data, curDistParam);
-#endif  //DISABLE_HYBRID_QUANTIZATION
 
                     if(top_candidates.size() < ef || sim > lowerBound) {
                         candidate_set.emplace(sim, candidate_id);
@@ -1326,7 +1181,6 @@ namespace hnswlib {
             }
 
             visited_list_pool_->releaseVisitedList(vl);
-            // return a vector of top candidates sorted by similarity (1-distance) in reverse order
             std::vector<std::pair<dist_t, idhInt>> sorted_candidates;
             sorted_candidates.reserve(top_candidates.size());
             while(!top_candidates.empty()) {
@@ -1334,13 +1188,8 @@ namespace hnswlib {
                 top_candidates.pop();
             }
             std::reverse(sorted_candidates.begin(), sorted_candidates.end());
-            // Return the top candidates
             return sorted_candidates;
         }
-
-        // For a given internal id, go to all neighbors and remove the connection. Then set the
-        // linklist count to 0
-        //  Repeat this for all levels
         void removeAllConnections(idhInt internal_id, levelInt elem_level) {
 
             for(int level = 0; level <= elem_level; ++level) {
