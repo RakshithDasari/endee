@@ -33,16 +33,21 @@
 #define MAX_BACKUP_NAME_LENGTH 200
 
 struct NewIndexConfig {
+    std::string sub_index_name;
     size_t dim;
-    size_t sparse_dim = 0;  // 0 means dense-only
-    size_t max_elements = settings::MAX_ELEMENTS;
+    size_t max_elements;
     std::string space_type_str;
-    size_t M = settings::DEFAULT_M;
-    size_t ef_construction = settings::DEFAULT_EF_CONSTRUCT;
-    ndd::quant::QuantizationLevel quant_level =
-            ndd::quant::QuantizationLevel::INT8;  // Default to INT8 quantization
+    size_t M;
+    size_t ef_construction;
+    ndd::quant::QuantizationLevel quant_level;
     int32_t checksum;
     size_t size_in_millions;
+};
+
+struct SparseIndexConfig {
+    std::string sub_index_name;
+    size_t sparse_dim;
+    int32_t checksum;
 };
 
 struct IndexConfig {

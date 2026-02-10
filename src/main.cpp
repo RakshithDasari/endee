@@ -305,9 +305,9 @@ int main(int argc, char** argv) {
                 std::string index_id = ctx.username + "/" + std::string(body["index_name"].s());
                 std::cout << "index id: " << index_id << "\n";
 
-                /**
-                 * create a struct for each dense vector in the list
-                 */
+                std::vector<struct NewIndexConfig> dense_indexes;
+
+
                 if(body.has("dense_vectors")){
                     printf("index has dense vectors\n");
                     auto& dense_blocks = body["dense_vectors"];
@@ -324,7 +324,7 @@ int main(int argc, char** argv) {
                             return json_error(400, "Parameters error: 'dim'");
                         }
                         dim = (size_t)config["dim"].i();
-                        std::cout << "dim: " << dim << "\n";
+                        // std::cout << "dim: " << dim << "\n";
 
                         // Space_type is mandatory
                         std::string space_type;
@@ -332,7 +332,7 @@ int main(int argc, char** argv) {
                             return json_error(400, "Parameters error: 'dim'");
                         }
                         space_type = (std::string)config["space_type"].s();
-                        std::cout << "space_type: " << space_type << "\n";
+                        // std::cout << "space_type: " << space_type << "\n";
 
                         size_t m = settings::DEFAULT_M;
                         if(config.has("M")){
@@ -341,7 +341,7 @@ int main(int argc, char** argv) {
                             }
                             m = (size_t)config["M"].i();
                         }
-                        std::cout << "m: " << m << "\n";
+                        // std::cout << "m: " << m << "\n";
 
                         size_t ef_con = settings::DEFAULT_EF_CONSTRUCT;
                         if(config.has("ef_con")){
@@ -350,7 +350,7 @@ int main(int argc, char** argv) {
                             }
                             ef_con = (size_t)config["ef_con"].i();
                         }
-                        std::cout << "ef_con: " << ef_con << "\n";
+                        // std::cout << "ef_con: " << ef_con << "\n";
 
                         ndd::quant::QuantizationLevel quant_level = ndd::quant::QuantizationLevel::INT8;
                         if(config.has("precision")){
@@ -359,7 +359,7 @@ int main(int argc, char** argv) {
                             }
                             quant_level = stringToQuantLevel(config["precision"].s());
                         }
-                        std::cout << "quant level: " << quantLevelToString(quant_level) << "\n";
+                        // std::cout << "quant level: " << quantLevelToString(quant_level) << "\n";
 
                         int32_t checksum = -1;
                         if(config.has("checksum")){
@@ -378,8 +378,8 @@ int main(int argc, char** argv) {
                         }
 
                         index_config = NewIndexConfig {
-                                    dim,
-                                    0,
+                                    key,
+                                    dim, //dense_dim
                                     settings::MAX_ELEMENTS,  // max elements
                                     space_type,
                                     m,
@@ -393,12 +393,63 @@ int main(int argc, char** argv) {
                         if(!sanity_ret.first){
                             return json_error(400, sanity_ret.second);
                         }
+                        dense_indexes.push_back(index_config);
                     }
                 }
 
+                for(int i=0; i<dense_indexes.size(); i++){
+                    printf("name:%s, M:%zu\n", dense_indexes[i].sub_index_name.c_str(), dense_indexes[i].M);
+                }
+
+                std::vector<struct SparseIndexConfig> sparse_indexes;
+
                 if(body.has("sparse_vectors")){
                     printf("index has sparse vectors\n");
+                    auto& sparse_blocks = body["sparse_vectors"];
+
+                    for(auto& key: sparse_blocks.keys()){
+                        struct SparseIndexConfig sparse_index_config;
+
+                        auto& sparse_config = sparse_blocks[key];
+
+                        // sparse_dim is mandatory
+                        size_t sparse_dim;
+                        if(!sparse_config.has("sparse_dim") || sparse_config["sparse_dim"].t() != crow::json::type::Number){
+                            return json_error(400, "Parameters error: 'dim'");
+                        }
+                        sparse_dim = (size_t)sparse_config["sparse_dim"].i();
+
+                        int32_t checksum = -1;
+                        if(sparse_config.has("checksum")){
+                            if(sparse_config["checksum"].t() != crow::json::type::Number){
+                                return json_error(400, "Parameters error: 'checksum'");
+                            }
+                            checksum = sparse_config["checksum"].i();
+                        }
+
+                        sparse_index_config = SparseIndexConfig{
+                            key,
+                            sparse_dim,
+                            checksum
+                        };
+
+                        //TODO: Add a sanity check for sparse vectors here
+
+                        sparse_indexes.push_back(sparse_index_config);
+                    }
                 }
+
+                for(int i=0; i<sparse_indexes.size(); i++){
+                    printf("name:%s, sparse_dim:%zu\n", sparse_indexes[i].sub_index_name.c_str(), sparse_indexes[i].sparse_dim);
+                }
+
+                // try{
+                //     index_manager.createNewIndex();
+                // }catch(const std::runtime_error& e) {
+                //     return json_error(409, e.what());
+                // } catch(const std::exception& e) {
+                //     return json_error_500(ctx.username, req.url, std::string("Error: ") + e.what());
+                // }
 
                 return crow::response(200, "Index created successfully");
             });
