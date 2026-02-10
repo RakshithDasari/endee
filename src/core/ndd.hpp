@@ -12,6 +12,7 @@
 #include "msgpack_ndd.hpp"
 #include "quant_vector.hpp"
 #include "wal.hpp"
+#include "log.hpp"
 #include "../quant/dispatch.hpp"
 #include "../utils/archive_utils.hpp"
 #include <memory>
@@ -30,6 +31,19 @@
 #include <future>
 
 #define MAX_BACKUP_NAME_LENGTH 200
+
+struct NewIndexConfig {
+    size_t dim;
+    size_t sparse_dim = 0;  // 0 means dense-only
+    size_t max_elements = settings::MAX_ELEMENTS;
+    std::string space_type_str;
+    size_t M = settings::DEFAULT_M;
+    size_t ef_construction = settings::DEFAULT_EF_CONSTRUCT;
+    ndd::quant::QuantizationLevel quant_level =
+            ndd::quant::QuantizationLevel::INT8;  // Default to INT8 quantization
+    int32_t checksum;
+    size_t size_in_millions;
+};
 
 struct IndexConfig {
     size_t dim;
@@ -138,6 +152,9 @@ struct PersistenceConfig {
     std::chrono::minutes save_interval{settings::SAVE_EVERY_N_MINUTES};
     bool save_on_shutdown{true};
 };
+
+
+std::pair<bool, std::string> check_index_config_sanity(struct NewIndexConfig index_config);
 
 class IndexManager {
 private:

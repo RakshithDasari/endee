@@ -300,6 +300,7 @@ int main(int argc, char** argv) {
                 if(!body.has("index_name") || body["index_name"].t() != crow::json::type::String){
                     return json_error(400, "Parameters error: 'index_name'");
                 }
+                //TODO: add an index name restriction check here
 
                 std::string index_id = ctx.username + "/" + std::string(body["index_name"].s());
                 std::cout << "index id: " << index_id << "\n";
@@ -312,7 +313,7 @@ int main(int argc, char** argv) {
                     auto& dense_blocks = body["dense_vectors"];
 
                     for(auto& key: dense_blocks.keys()){
-                        // struct IndexConfig index_config;
+                        struct NewIndexConfig index_config;
 
                         printf("dense_vectors has index_key:%s\n", key.c_str());
                         auto& config = dense_blocks[key];
@@ -325,7 +326,6 @@ int main(int argc, char** argv) {
                         dim = (size_t)config["dim"].i();
                         std::cout << "dim: " << dim << "\n";
 
-
                         // Space_type is mandatory
                         std::string space_type;
                         if(!config.has("space_type") || config["space_type"].t() != crow::json::type::String){
@@ -333,7 +333,6 @@ int main(int argc, char** argv) {
                         }
                         space_type = (std::string)config["space_type"].s();
                         std::cout << "space_type: " << space_type << "\n";
-
 
                         size_t m = settings::DEFAULT_M;
                         if(config.has("M")){
@@ -378,18 +377,22 @@ int main(int argc, char** argv) {
                             checksum = config["size_in_millions"].i();
                         }
 
-                        // index_config = IndexConfig {dim,
-                        //            sparse_dim,
-                        //            settings::MAX_ELEMENTS,  // max elements
-                        //            body["space_type"].s(),
-                        //            m,
-                        //            ef_con,
-                        //            quant_level,
-                        //            checksum};
+                        index_config = NewIndexConfig {
+                                    dim,
+                                    0,
+                                    settings::MAX_ELEMENTS,  // max elements
+                                    space_type,
+                                    m,
+                                    ef_con,
+                                    quant_level,
+                                    checksum,
+                                    size_in_millions
+                                };
 
-                        // if(!check_creation_sanity(struct IndexConfig conf)){
-                        //     return json_error(400, "error");
-                        // }
+                        std::pair<bool, std::string> sanity_ret = check_index_config_sanity(index_config);
+                        if(!sanity_ret.first){
+                            return json_error(400, sanity_ret.second);
+                        }
                     }
                 }
 
