@@ -500,18 +500,13 @@ int main(int argc, char** argv) {
                         return json_error(404, "Backup not found");
                     }
 
-                    std::string file_content = read_file(backup_file);
-                    if(file_content.empty()) {
-                        return json_error(500, "Failed to read backup file");
-                    }
-
+                    
                     crow::response response;
+                    response.set_static_file_info_unsafe(backup_file);
                     response.set_header("Content-Type", "application/x-tar");
                     response.set_header("Content-Disposition",
                                         "attachment; filename=\"" + backup_name + ".tar\"");
-                    response.set_header("Content-Length", std::to_string(file_content.size()));
                     response.set_header("Cache-Control", "no-cache");
-                    response.body = std::move(file_content);
                     return response;
                 } catch(const std::exception& e) {
                     return json_error(500, e.what());
