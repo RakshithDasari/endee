@@ -181,7 +181,7 @@ bool file_exists(const std::string& path) {
 
 // Generate a download key: SHA1(backup_name + AUTH_TOKEN)
 std::string generate_download_key(const std::string& backup_name) {
-    std::string input = backup_name + settings::AUTH_TOKEN;
+    std::string input = backup_name;
     sha1::SHA1 hasher;
     hasher.processBytes(input.data(), input.size());
     sha1::SHA1::digest32_t digest;
