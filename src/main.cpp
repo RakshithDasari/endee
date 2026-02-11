@@ -288,198 +288,200 @@ int main(int argc, char** argv) {
 
     // new create index
     CROW_ROUTE(app, "/api/v1/index/newcreate")
-            .CROW_MIDDLEWARES(app, AuthMiddleware)
-            .methods("POST"_method)([&index_manager, &app](const crow::request& req) {
-                
-                AuthMiddleware::context& ctx = app.get_context<AuthMiddleware>(req);;
+    .CROW_MIDDLEWARES(app, AuthMiddleware)
+    .methods("POST"_method)([&index_manager, &app](const crow::request& req) {
 
-                try{
+        AuthMiddleware::context& ctx = app.get_context<AuthMiddleware>(req);;
+        try{
+            auto body = crow::json::load(req.body);
+            if(!body) {
+                return json_error(400, "Invalid JSON");
+            }
 
-                    auto body = crow::json::load(req.body);
-                    if(!body) {
-                        return json_error(400, "Invalid JSON");
+            if(!body.has("index_name") || body["index_name"].t() != crow::json::type::String){
+                return json_error(400, "Parameters error: 'index_name'");
+            }
+
+            /**
+             * TODO:CRITICAL add an index name restriction check here
+             * validate_index_name in ndd.cpp
+             */
+            std::string index_name = std::string(body["index_name"].s());
+            // std::string index_id = ctx.username + "/" + index_name;
+            // std::cout << "index id: " << index_id << "\n";
+
+            /**
+             * TODO: add a simple case where no named vectors are present.
+             * Only one dense vector.
+             * In that case, the user will not provide a name to the vector during creating
+             * and searching. So, there should be a way to store that this is an unnamed vector.
+             *
+             * This can be implemented once create index is written well and tested.
+             */
+
+            std::vector<struct NewIndexConfig> dense_indexes;
+
+            if(body.has("dense_vectors")){
+                auto& dense_blocks = body["dense_vectors"];
+
+                if (dense_blocks.t() != crow::json::type::Object) {
+                    return json_error(400, "'dense_vectors' must be an object");
+                }
+
+
+                for(auto& key: dense_blocks.keys()){
+                    struct NewIndexConfig index_config;
+                    auto& config = dense_blocks[key];
+
+                    // dim is mandatory
+                    size_t dim;
+                    long raw_dim;
+                    if(!config.has("dim") || config["dim"].t() != crow::json::type::Number){
+                        return json_error(400, "Parameters error: 'dim'");
                     }
-
-                    if(!body.has("index_name") || body["index_name"].t() != crow::json::type::String){
-                        return json_error(400, "Parameters error: 'index_name'");
-                    }
-                    //TODO: add an index name restriction check here
-
-                    std::string index_id = ctx.username + "/" + std::string(body["index_name"].s());
-                    std::cout << "index id: " << index_id << "\n";
-
-                    std::vector<struct NewIndexConfig> dense_indexes;
-
-
-                    if(body.has("dense_vectors")){
-                        printf("index has dense vectors\n");
-                        auto& dense_blocks = body["dense_vectors"];
-
-                        if (dense_blocks.t() != crow::json::type::Object) {
-                            return json_error(400, "'dense_vectors' must be an object");
-                        }
-
-
-                        for(auto& key: dense_blocks.keys()){
-                            struct NewIndexConfig index_config;
-
-                            printf("dense_vectors has index_key:%s\n", key.c_str());
-                            auto& config = dense_blocks[key];
-
-                            // dim is mandatory
-                            size_t dim;
-                            long raw_dim;
-                            if(!config.has("dim") || config["dim"].t() != crow::json::type::Number){
-                                return json_error(400, "Parameters error: 'dim'");
-                            }
-                            else{
-                                raw_dim = (long)config["dim"].i();
-                                if(raw_dim <= 0){
-                                    return json_error(400, "Parameters error: negative 'dim'");
-                                }
-                            }
-                            dim = raw_dim;
-                            // std::cout << "dim: " << dim << "\n";
-
-                            // Space_type is mandatory
-                            std::string space_type;
-                            if(!config.has("space_type") || config["space_type"].t() != crow::json::type::String){
-                                return json_error(400, "Parameters error: 'space_type'");
-                            }
-                            space_type = (std::string)config["space_type"].s();
-                            // std::cout << "space_type: " << space_type << "\n";
-
-                            size_t m = settings::DEFAULT_M;
-                            if(config.has("M")){
-                                if(config["M"].t() != crow::json::type::Number){
-                                    return json_error(400, "Parameters error: 'M'");
-                                }
-                                m = (size_t)config["M"].i();
-                            }
-                            // std::cout << "m: " << m << "\n";
-
-                            size_t ef_con = settings::DEFAULT_EF_CONSTRUCT;
-                            if(config.has("ef_con")){
-                                if(config["ef_con"].t() != crow::json::type::Number){
-                                    return json_error(400, "Parameters error: 'ef_con'");
-                                }
-                                ef_con = (size_t)config["ef_con"].i();
-                            }
-                            // std::cout << "ef_con: " << ef_con << "\n";
-
-                            ndd::quant::QuantizationLevel quant_level = ndd::quant::QuantizationLevel::INT8;
-                            if(config.has("precision")){
-                                if(config["precision"].t() != crow::json::type::String){
-                                    return json_error(400, "Parameters error: 'precision'");
-                                }
-                                quant_level = stringToQuantLevel(config["precision"].s());
-                            }
-                            // std::cout << "quant level: " << quantLevelToString(quant_level) << "\n";
-
-                            int32_t checksum = -1;
-                            if(config.has("checksum")){
-                                if(config["checksum"].t() != crow::json::type::Number){
-                                    return json_error(400, "Parameters error: 'checksum'");
-                                }
-                                checksum = config["checksum"].i();
-                            }
-
-                            size_t size_in_millions = 0;
-                            if(config.has("size_in_millions")){
-                                if(config["size_in_millions"].t() != crow::json::type::Number){
-                                    return json_error(400, "Parameters error: 'size_in_millions'");
-                                }
-                                size_in_millions = config["size_in_millions"].i();
-                            }
-
-                            index_config = NewIndexConfig {
-                                        key,
-                                        dim, //dense_dim
-                                        settings::MAX_ELEMENTS,  // max elements
-                                        space_type,
-                                        m,
-                                        ef_con,
-                                        quant_level,
-                                        checksum,
-                                        size_in_millions
-                                    };
-
-                            std::pair<bool, std::string> sanity_ret = check_index_config_sanity(index_config);
-                            if(!sanity_ret.first){
-                                return json_error(400, sanity_ret.second);
-                            }
-                            dense_indexes.push_back(index_config);
+                    else{
+                        raw_dim = (long)config["dim"].i();
+                        if(raw_dim <= 0){
+                            return json_error(400, "Parameters error: negative 'dim'");
                         }
                     }
+                    dim = raw_dim;
+                    // std::cout << "dim: " << dim << "\n";
 
-                    // for(int i=0; i<dense_indexes.size(); i++){
-                    //     printf("name:%s, M:%zu\n", dense_indexes[i].sub_index_name.c_str(), dense_indexes[i].M);
-                    // }
+                    // Space_type is mandatory
+                    std::string space_type;
+                    if(!config.has("space_type") || config["space_type"].t() != crow::json::type::String){
+                        return json_error(400, "Parameters error: 'space_type'");
+                    }
+                    space_type = (std::string)config["space_type"].s();
+                    // std::cout << "space_type: " << space_type << "\n";
 
-                    std::vector<struct SparseIndexConfig> sparse_indexes;
-
-                    if(body.has("sparse_vectors")){
-                        printf("index has sparse vectors\n");
-                        auto& sparse_blocks = body["sparse_vectors"];
-
-                        if (sparse_blocks.t() != crow::json::type::Object) {
-                            return json_error(400, "'sparse_vectors' must be an object");
+                    size_t m = settings::DEFAULT_M;
+                    if(config.has("M")){
+                        if(config["M"].t() != crow::json::type::Number){
+                            return json_error(400, "Parameters error: 'M'");
                         }
+                        m = (size_t)config["M"].i();
+                    }
+                    // std::cout << "m: " << m << "\n";
 
+                    size_t ef_con = settings::DEFAULT_EF_CONSTRUCT;
+                    if(config.has("ef_con")){
+                        if(config["ef_con"].t() != crow::json::type::Number){
+                            return json_error(400, "Parameters error: 'ef_con'");
+                        }
+                        ef_con = (size_t)config["ef_con"].i();
+                    }
+                    // std::cout << "ef_con: " << ef_con << "\n";
 
-                        for(auto& key: sparse_blocks.keys()){
-                            struct SparseIndexConfig sparse_index_config;
+                    ndd::quant::QuantizationLevel quant_level = ndd::quant::QuantizationLevel::INT8;
+                    if(config.has("precision")){
+                        if(config["precision"].t() != crow::json::type::String){
+                            return json_error(400, "Parameters error: 'precision'");
+                        }
+                        quant_level = stringToQuantLevel(config["precision"].s());
+                    }
+                    // std::cout << "quant level: " << quantLevelToString(quant_level) << "\n";
 
-                            auto& sparse_config = sparse_blocks[key];
+                    int32_t checksum = -1;
+                    if(config.has("checksum")){
+                        if(config["checksum"].t() != crow::json::type::Number){
+                            return json_error(400, "Parameters error: 'checksum'");
+                        }
+                        checksum = config["checksum"].i();
+                    }
 
-                            // sparse_dim is mandatory
-                            size_t sparse_dim;
-                            if(!sparse_config.has("sparse_dim") || sparse_config["sparse_dim"].t() != crow::json::type::Number){
-                                return json_error(400, "Parameters error: 'sparse_dim'");
-                            }
-                            sparse_dim = (size_t)sparse_config["sparse_dim"].i();
+                    size_t size_in_millions = 0;
+                    if(config.has("size_in_millions")){
+                        if(config["size_in_millions"].t() != crow::json::type::Number){
+                            return json_error(400, "Parameters error: 'size_in_millions'");
+                        }
+                        size_in_millions = config["size_in_millions"].i();
+                    }
 
-                            int32_t checksum = -1;
-                            if(sparse_config.has("checksum")){
-                                if(sparse_config["checksum"].t() != crow::json::type::Number){
-                                    return json_error(400, "Parameters error: 'checksum'");
-                                }
-                                checksum = sparse_config["checksum"].i();
-                            }
-
-                            sparse_index_config = SparseIndexConfig{
+                    index_config = NewIndexConfig {
                                 key,
-                                sparse_dim,
-                                checksum
+                                dim, //dense_dim
+                                settings::MAX_ELEMENTS,  // max elements
+                                space_type,
+                                m,
+                                ef_con,
+                                quant_level,
+                                checksum,
+                                size_in_millions
                             };
 
-                            //TODO: Add a sanity check for sparse vectors here
+                    std::pair<bool, std::string> sanity_ret = check_index_config_sanity(index_config);
+                    if(!sanity_ret.first){
+                        return json_error(400, sanity_ret.second);
+                    }
+                    dense_indexes.push_back(index_config);
+                }
+            }
 
-                            sparse_indexes.push_back(sparse_index_config);
+            // for(int i=0; i<dense_indexes.size(); i++){
+            //     printf("name:%s, M:%zu\n", dense_indexes[i].sub_index_name.c_str(), dense_indexes[i].M);
+            // }
+
+            std::vector<struct SparseIndexConfig> sparse_indexes;
+
+            if(body.has("sparse_vectors")){
+                auto& sparse_blocks = body["sparse_vectors"];
+
+                if (sparse_blocks.t() != crow::json::type::Object) {
+                    return json_error(400, "'sparse_vectors' must be an object");
+                }
+
+
+                for(auto& key: sparse_blocks.keys()){
+                    struct SparseIndexConfig sparse_index_config;
+
+                    auto& sparse_config = sparse_blocks[key];
+
+                    // sparse_dim is mandatory
+                    size_t sparse_dim;
+                    if(!sparse_config.has("sparse_dim") || sparse_config["sparse_dim"].t() != crow::json::type::Number){
+                        return json_error(400, "Parameters error: 'sparse_dim'");
+                    }
+                    sparse_dim = (size_t)sparse_config["sparse_dim"].i();
+
+                    int32_t checksum = -1;
+                    if(sparse_config.has("checksum")){
+                        if(sparse_config["checksum"].t() != crow::json::type::Number){
+                            return json_error(400, "Parameters error: 'checksum'");
                         }
+                        checksum = sparse_config["checksum"].i();
                     }
 
-                    // for(int i=0; i<sparse_indexes.size(); i++){
-                    //     printf("name:%s, sparse_dim:%zu\n", sparse_indexes[i].sub_index_name.c_str(), sparse_indexes[i].sparse_dim);
-                    // }
+                    sparse_index_config = SparseIndexConfig{
+                        key,
+                        sparse_dim,
+                        checksum
+                    };
 
-                    // try{
-                    //     index_manager.createNewIndex();
-                    // }catch(const std::runtime_error& e) {
-                    //     return json_error(409, e.what());
-                    // } catch(const std::exception& e) {
-                    //     return json_error_500(ctx.username, req.url, std::string("Error: ") + e.what());
-                    // }
-                    return crow::response(200, "Index created successfully");
+                    //TODO: Add a sanity check for sparse vectors here
 
-                } catch(const std::runtime_error& e){
-                    return json_error(409, e.what());
-                } catch(const std::exception& e){
-                        return json_error_500(ctx.username, req.url, std::string("Error: ") + e.what());
-                } catch (...){
-                    return json_error(500, "Unknown internal error");
+                    sparse_indexes.push_back(sparse_index_config);
                 }
-            });
+            }
+
+            // for(int i=0; i<sparse_indexes.size(); i++){
+            //     printf("name:%s, sparse_dim:%zu\n", sparse_indexes[i].sub_index_name.c_str(), sparse_indexes[i].sparse_dim);
+            // }
+
+            if(!index_manager.newcreateIndex(index_name, UserType::Admin, dense_indexes, sparse_indexes)){
+                return json_error(400, "failed createNewIndex");
+            }
+            return crow::response(200, "Index created successfully");
+
+        } catch(const std::runtime_error& e){
+            return json_error(409, e.what());
+        } catch(const std::exception& e){
+                return json_error_500(ctx.username, req.url, std::string("Error: ") + e.what());
+        } catch (...){
+            return json_error(500, "Unknown internal error");
+        }
+    });
 
     // Create index
     CROW_ROUTE(app, "/api/v1/index/create")

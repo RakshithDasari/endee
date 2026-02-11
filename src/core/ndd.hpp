@@ -815,6 +815,11 @@ public:
         }
     }
 
+    bool newcreateIndex(std::string& index_name,
+                        UserType user_type,
+                        std::vector<struct NewIndexConfig> dense_indexes,
+                        std::vector<struct SparseIndexConfig> sparse_indexes);
+
     bool createIndex(const std::string& index_id,
                      const IndexConfig& config,
                      UserType user_type = UserType::Admin,
