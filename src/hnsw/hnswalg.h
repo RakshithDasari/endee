@@ -19,6 +19,7 @@
 #include <unordered_map>
 #include <shared_mutex>
 #include <memory>
+#include <type_traits>
 
 namespace hnswlib {
 
@@ -208,11 +209,13 @@ namespace hnswlib {
         // Cache management getters/setters
         // Removed as cache is managed externally
 
+        template <typename FilterFunctor>
         std::vector<std::pair<dist_t, idInt>>
         searchKnn(const void* query_data,
                   size_t k,
-                  size_t ef = settings::DEFAULT_EF_SEARCH,
-                  BaseFilterFunctor* isIdAllowed = nullptr) const override {
+                  size_t ef,
+                  FilterFunctor* isIdAllowed,
+                  size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const { // Default true as requested
             int x = 0;
             LOG_DEBUG("Inside searchKnn, element count: " << curElementsCount_);
             std::vector<std::pair<dist_t, idInt>> result;
@@ -241,7 +244,7 @@ namespace hnswlib {
 
             dist_t s;
             // Upper layer traversal - greedy search
-            for(levelInt level = maxLevel_; level > 0; level--) {
+            for(levelInt level = maxLevel_; level > 1; level--) {
                 bool changed = true;
                 while(changed) {
                     changed = false;
@@ -277,14 +280,31 @@ namespace hnswlib {
                 }
             }
 
-            std::vector<std::pair<dist_t, idhInt>> top_candidates;
-            LOG_DEBUG("Starting search in level 0..current object " << currObj);
-            if(deletedElementsCount_) {
-                top_candidates = searchBaseLayer<false, true>(
-                        currObj, query_data, 0, std::max(ef, k));  // Level 0 for final search
+            std::vector<idhInt> entry_points;
+            if (maxLevel_ > 0) {
+                 std::vector<idhInt> l1_eps = {currObj};
+                 std::vector<std::pair<dist_t, idhInt>> l1_res;
+                 if(deletedElementsCount_) {
+                     l1_res = searchBaseLayer<false, true, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed, filter_boost_percentage);
+                 } else {
+                     l1_res = searchBaseLayer<false, false, FilterFunctor>(l1_eps, query_data, 1, M_, isIdAllowed, filter_boost_percentage);
+                 }
+                 
+                 for(size_t i = 0; i < std::min((size_t)2, l1_res.size()); ++i) {
+                     entry_points.push_back(l1_res[i].second);
+                 }
             } else {
-                top_candidates = searchBaseLayer<false, false>(
-                        currObj, query_data, 0, std::max(ef, k));  // Level 0 for final search
+                entry_points.push_back(entryPoint_);
+            }
+
+            std::vector<std::pair<dist_t, idhInt>> top_candidates;
+            LOG_DEBUG("Starting search in level 0..");
+            if(deletedElementsCount_) {
+                top_candidates = searchBaseLayer<false, true, FilterFunctor>(
+                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed, filter_boost_percentage);  // Level 0 for final search
+            } else {
+                top_candidates = searchBaseLayer<false, false, FilterFunctor>(
+                        entry_points, query_data, 0, std::max(ef, k), isIdAllowed, filter_boost_percentage);  // Level 0 for final search
             }
             LOG_DEBUG("Search in level 0 completed. Found " << top_candidates.size()
                                                             << " candidates");
@@ -295,6 +315,19 @@ namespace hnswlib {
                                     getExternalLabel(top_candidates[i].second));
             }
             return result;
+        }
+
+        std::vector<std::pair<dist_t, idInt>>
+        searchKnn(const void* query_data,
+                  size_t k,
+                  size_t ef,
+                  BaseFilterFunctor* isIdAllowed = nullptr,
+                  size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const override {
+            if (isIdAllowed) {
+                 return searchKnn<BaseFilterFunctor>(query_data, k, ef, isIdAllowed, filter_boost_percentage);
+            } else {
+                 return searchKnn<void>(query_data, k, ef, nullptr, filter_boost_percentage);
+            }
         }
 
         void saveIndex(const std::string& location) override {
@@ -644,12 +677,13 @@ namespace hnswlib {
                     
                     const void* level_datapoint = (level == 0) ? datapoint : datapoint_upper.data();
                     
+                    std::vector<idhInt> cur_eps = {currObj};
                     if(deletedElementsCount_) {
                         sorted_candidates = searchBaseLayer<true, true>(
-                                currObj, level_datapoint, level, efConstruction_);
+                                cur_eps, level_datapoint, level, efConstruction_);
                     } else {  // No deleted elements
                         sorted_candidates = searchBaseLayer<true, false>(
-                                currObj, level_datapoint, level, efConstruction_);
+                                cur_eps, level_datapoint, level, efConstruction_);
                     }
                     currObj = mutuallyConnectNewElement(
                             level_datapoint, cur_c, sorted_candidates, level);
@@ -1060,9 +1094,14 @@ namespace hnswlib {
 
         // Search function for the base layer
         // Returns a vector of top candidates sorted by similarity (1-distance) in reverse order
-        template <bool is_insert, bool has_deletions>
+        template <bool is_insert, bool has_deletions, typename FilterFunctor = void>
         std::vector<std::pair<dist_t, idhInt>>
-        searchBaseLayer(idhInt ep_id, const void* data_point, idhInt layer, size_t ef) const {
+        searchBaseLayer(const std::vector<idhInt>& ep_ids, 
+                        const void* data_point, 
+                        idhInt layer, 
+                        size_t ef, 
+                        FilterFunctor* filter = nullptr, 
+                        size_t filter_boost_percentage = settings::FILTER_BOOST_PERCENTAGE) const {
             LOG_TIME("searchBaseLayer");
             VisitedList* vl = visited_list_pool_->getFreeVisitedList();
             vl_type* visited_array = vl->mass;
@@ -1080,38 +1119,84 @@ namespace hnswlib {
                 buffer.resize(curDataSize);
             }
 
-            dist_t lowerBound;
-            if(!has_deletions || !isMarkedDeleted(ep_id)) {
+            size_t dist_computations = 0;
+            dist_t lowerBound = std::numeric_limits<dist_t>::lowest();
 
-                const void* vec_data = nullptr;
-                if(layer == 0) {
-                    if(getDataByInternalId(ep_id, layer, buffer.data())) {
-                        vec_data = buffer.data();
+            for (idhInt ep_id : ep_ids) {
+                if (visited_array[ep_id] == visited_array_tag) {
+                    continue;
+                }
+                visited_array[ep_id] = visited_array_tag;
+
+                dist_t sim = std::numeric_limits<dist_t>::lowest();
+                if(!has_deletions || !isMarkedDeleted(ep_id)) {
+                    const void* vec_data = nullptr;
+                    if(layer == 0) {
+                        if(getDataByInternalId(ep_id, layer, buffer.data())) {
+                            vec_data = buffer.data();
+                        }
+                    } else {
+                        vec_data = getUpperLayerDataPtr(ep_id);
+                    }
+
+                    if(vec_data) {
+                        sim = curSimFunc(data_point, vec_data, curDistParam);
+                        dist_computations++;
+
+                        if constexpr(std::is_same_v<FilterFunctor, void>) {
+                            top_candidates.emplace(sim, ep_id);
+                            candidate_set.emplace(sim, ep_id);
+                        } else if constexpr(std::is_same_v<FilterFunctor, BaseFilterFunctor>) {
+                            // Virtual call path
+                            bool allowed = !filter || (*filter)(getExternalLabel(ep_id));
+                            candidate_set.emplace(sim, ep_id); // Always explore
+                            if (allowed) {
+                                top_candidates.emplace(sim, ep_id);
+                            }
+                        } else {
+                            // Templated path
+                            bool allowed = !filter || (*filter)(getExternalLabel(ep_id));
+                            candidate_set.emplace(sim, ep_id);
+                            if (allowed) {
+                                top_candidates.emplace(sim, ep_id);
+                            }
+                        }
+                        
+                        // Maintain ef size in top_candidates during init
+                        if(top_candidates.size() > ef) {
+                             top_candidates.pop();
+                        }
+                    } else {
+                        // Data fetch failed
+                         candidate_set.emplace(std::numeric_limits<dist_t>::lowest(), ep_id);
                     }
                 } else {
-                    vec_data = getUpperLayerDataPtr(ep_id);
+                    // Deleted
+                    candidate_set.emplace(std::numeric_limits<dist_t>::lowest(), ep_id);
                 }
-
-                if(vec_data) {
-                    dist_t sim = curSimFunc(data_point, vec_data, curDistParam);
-
-                    top_candidates.emplace(sim, ep_id);
-                    candidate_set.emplace(sim, ep_id);
-                    lowerBound = sim;
-                } else {
-                    lowerBound = std::numeric_limits<dist_t>::lowest();
-                    candidate_set.emplace(lowerBound, ep_id);
-                }
-            } else {
-                // If entry point is deleted, lower bound will be minimum
-                lowerBound = std::numeric_limits<dist_t>::lowest();
-                candidate_set.emplace(lowerBound, ep_id);
             }
 
-            visited_array[ep_id] = visited_array_tag;
+            if (!top_candidates.empty()) {
+                lowerBound = top_candidates.top().first;
+            }
+
             int below_threshold_count = 0;
             int max_below_threshold = is_insert ? settings::EARLY_EXIT_BUFFER_INSERT
                                                 : settings::EARLY_EXIT_BUFFER_QUERY;
+
+            // Progressive Fatigue Logic:
+            
+            // Base budget: ef * M . 
+            size_t fatigue_base = ef * M_;
+
+            // Apply filter boost if filter is active
+            if constexpr(!std::is_same_v<FilterFunctor, void>) {
+                 if (filter != nullptr && filter_boost_percentage > 0) {
+                     fatigue_base = fatigue_base * (100 + filter_boost_percentage) / 100;
+                 }
+            }
+
+            size_t fatigue_tail = fatigue_base * 5; // Taper duration
 
             while(!candidate_set.empty()) {
                 auto current_pair = candidate_set.top();
@@ -1162,19 +1247,59 @@ namespace hnswlib {
                         continue;
                     }
 
+                    // Check filter BEFORE computing distance
+                    // Treats filtered nodes as non-existent (traverses a subgraph)
+                    bool pass_filter = true;
+                    if constexpr(!std::is_same_v<FilterFunctor, void>) {
+                        if (filter != nullptr) {
+                            if (!(*filter)(getExternalLabel(candidate_id))) {
+                                pass_filter = false;
+                            }
+                        }
+                    }
+
+                    if(!pass_filter) {
+                        // Check Fatigue
+                        if (dist_computations > fatigue_base) {
+                            // We are in the tapering region
+                            // Linearly increase drop probability from 0% to 100%.
+                            
+                            size_t excess = dist_computations - fatigue_base;
+                            
+                            if (excess >= fatigue_tail) {
+                                continue; // 100% drop (Hard Cap exceeded)
+                            }
+
+                            // Prob = Excess / Tail_Length
+                            size_t drop_prob = (excess * 255) / fatigue_tail; 
+                            
+                            size_t hash = (candidate_id * 104729) & 0xFF;
+                            if (hash < drop_prob) continue;
+                        }
+                             
+                        // Explore
+                        sim = curSimFunc(data_point, neighbor_data, curDistParam);
+                        dist_computations++;
+                        if (top_candidates.size() < ef || sim > lowerBound) {
+                            candidate_set.emplace(sim, candidate_id);
+                        }
+                        continue;
+                    }
+
                     sim = curSimFunc(data_point, neighbor_data, curDistParam);
+                    dist_computations++; // Count valid computations too
 
                     if(top_candidates.size() < ef || sim > lowerBound) {
                         candidate_set.emplace(sim, candidate_id);
 
                         if(!has_deletions || !isMarkedDeleted(candidate_id)) {
-                            top_candidates.emplace(sim, candidate_id);
-                            if(top_candidates.size() > ef) {
-                                top_candidates.pop();
-                            }
-                            if(!top_candidates.empty()) {
-                                lowerBound = top_candidates.top().first;
-                            }
+                             top_candidates.emplace(sim, candidate_id);
+                             if(top_candidates.size() > ef) {
+                                 top_candidates.pop();
+                             }
+                             if(!top_candidates.empty()) {
+                                 lowerBound = top_candidates.top().first;
+                             }
                         }
                     }
                 }
