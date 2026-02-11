@@ -179,6 +179,20 @@ bool file_exists(const std::string& path) {
     return std::filesystem::exists(path) && std::filesystem::is_regular_file(path);
 }
 
+// Generate a download key: SHA1(backup_name + AUTH_TOKEN)
+std::string generate_download_key(const std::string& backup_name) {
+    std::string input = backup_name + settings::AUTH_TOKEN;
+    sha1::SHA1 hasher;
+    hasher.processBytes(input.data(), input.size());
+    sha1::SHA1::digest32_t digest;
+    hasher.getDigest(digest);
+    char hex[41];
+    snprintf(hex, sizeof(hex),
+             "%08x%08x%08x%08x%08x",
+             digest[0], digest[1], digest[2], digest[3], digest[4]);
+    return std::string(hex);
+}
+
 int main(int argc, char** argv) {
 
     if(!is_cpu_compatible()) {
@@ -486,61 +500,44 @@ int main(int argc, char** argv) {
                 }
             });
 
-    // Download Backup
+    // Download Backup - uses download key instead of auth middleware
     CROW_ROUTE(app, "/api/v1/backups/<string>/download")
-    .CROW_MIDDLEWARES(app, AuthMiddleware)
-    .methods("GET"_method)([&index_manager, &app](const crow::request& req,
-                                                   crow::response& res,
-                                                   const std::string& backup_name) {
-        auto& ctx = app.get_context<AuthMiddleware>(req);
-        try {
-            std::string backup_file = 
-                settings::DATA_DIR + "/backups/" + backup_name + ".tar";
+            .methods("GET"_method)([&](const crow::request& req,
+                                       crow::response& res,
+                                       const std::string& backup_name) {
+                try {
+                    std::string key = req.url_params.get("key") ? req.url_params.get("key") : "";
+                    std::string expected_key = generate_download_key(backup_name);
 
-            if(!std::filesystem::exists(backup_file)) {
-                res.code = 404;
-                res.write(R"({"error":"Backup not found"})");
-                res.end();
-                return;
-            }
+                    if(key != expected_key) {
+                        res.code = 401;
+                        res.write(R"({"error":"Invalid download key"})");
+                        res.end();
+                        return;
+                    }
 
-            // Get file size
-            std::ifstream file(backup_file, std::ios::binary | std::ios::ate);
-            if (!file) {
-                res.code = 500;
-                res.write(R"({"error":"Cannot open file"})");
-                res.end();
-                return;
-            }
-            
-            size_t file_size = file.tellg();
-            file.seekg(0);
+                    std::string backup_file =
+                            settings::DATA_DIR + "/backups/" + backup_name + ".tar";
 
-            // Set headers
-            res.code = 200;
-            res.set_header("Content-Type", "application/x-tar");
-            res.set_header("Content-Disposition", 
-                          "attachment; filename=\"" + backup_name + ".tar\"");
-            res.set_header("Content-Length", std::to_string(file_size));
-            res.set_header("Cache-Control", "no-cache");
-            res.set_header("Accept-Ranges", "bytes");
+                    if(!std::filesystem::exists(backup_file)) {
+                        res.code = 404;
+                        res.write(R"({"error":"Backup not found"})");
+                        res.end();
+                        return;
+                    }
 
-            // Stream the file in chunks
-            const size_t CHUNK_SIZE = 1024 * 1024; // 1MB chunks
-            std::vector<char> buffer(CHUNK_SIZE);
+                    res.set_static_file_info_unsafe(backup_file, "application/x-tar");
+                    res.set_header("Content-Disposition",
+                                   "attachment; filename=\"" + backup_name + ".tar\"");
+                    res.set_header("Cache-Control", "no-cache");
+                    res.end();
 
-            while (file.read(buffer.data(), CHUNK_SIZE) || file.gcount() > 0) {
-                res.write(std::string(buffer.data(), file.gcount()));
-            }
-
-            res.end();
-            
-        } catch(const std::exception& e) {
-            res.code = 500;
-            res.write(R"({"error":")" + std::string(e.what()) + R"("})");
-            res.end();
-        }
-    });
+                } catch(const std::exception& e) {
+                    res.code = 500;
+                    res.write(R"({"error":")" + std::string(e.what()) + R"("})");
+                    res.end();
+                }
+            });
 
     // upload Backup
     CROW_ROUTE(app, "/api/v1/backups/upload")
