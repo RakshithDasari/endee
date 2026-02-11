@@ -488,30 +488,59 @@ int main(int argc, char** argv) {
 
     // Download Backup
     CROW_ROUTE(app, "/api/v1/backups/<string>/download")
-            .CROW_MIDDLEWARES(app, AuthMiddleware)
-            .methods("GET"_method)([&index_manager, &app](const crow::request& req,
-                                                          const std::string& backup_name) {
-                auto& ctx = app.get_context<AuthMiddleware>(req);
-                try {
-                    std::string backup_file =
-                            settings::DATA_DIR + "/backups/" + backup_name + ".tar";
+    .CROW_MIDDLEWARES(app, AuthMiddleware)
+    .methods("GET"_method)([&index_manager, &app](const crow::request& req,
+                                                   crow::response& res,
+                                                   const std::string& backup_name) {
+        auto& ctx = app.get_context<AuthMiddleware>(req);
+        try {
+            std::string backup_file = 
+                settings::DATA_DIR + "/backups/" + backup_name + ".tar";
 
-                    if(!std::filesystem::exists(backup_file)) {
-                        return json_error(404, "Backup not found");
-                    }
+            if(!std::filesystem::exists(backup_file)) {
+                res.code = 404;
+                res.write(R"({"error":"Backup not found"})");
+                res.end();
+                return;
+            }
 
-                    
-                    crow::response response;
-                    response.set_static_file_info_unsafe(backup_file);
-                    response.set_header("Content-Type", "application/x-tar");
-                    response.set_header("Content-Disposition",
-                                        "attachment; filename=\"" + backup_name + ".tar\"");
-                    response.set_header("Cache-Control", "no-cache");
-                    return response;
-                } catch(const std::exception& e) {
-                    return json_error(500, e.what());
-                }
-            });
+            // Get file size
+            std::ifstream file(backup_file, std::ios::binary | std::ios::ate);
+            if (!file) {
+                res.code = 500;
+                res.write(R"({"error":"Cannot open file"})");
+                res.end();
+                return;
+            }
+            
+            size_t file_size = file.tellg();
+            file.seekg(0);
+
+            // Set headers
+            res.code = 200;
+            res.set_header("Content-Type", "application/x-tar");
+            res.set_header("Content-Disposition", 
+                          "attachment; filename=\"" + backup_name + ".tar\"");
+            res.set_header("Content-Length", std::to_string(file_size));
+            res.set_header("Cache-Control", "no-cache");
+            res.set_header("Accept-Ranges", "bytes");
+
+            // Stream the file in chunks
+            const size_t CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+            std::vector<char> buffer(CHUNK_SIZE);
+
+            while (file.read(buffer.data(), CHUNK_SIZE) || file.gcount() > 0) {
+                res.write(std::string(buffer.data(), file.gcount()));
+            }
+
+            res.end();
+            
+        } catch(const std::exception& e) {
+            res.code = 500;
+            res.write(R"({"error":")" + std::string(e.what()) + R"("})");
+            res.end();
+        }
+    });
 
     // upload Backup
     CROW_ROUTE(app, "/api/v1/backups/upload")
