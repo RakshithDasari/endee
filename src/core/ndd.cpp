@@ -2,18 +2,59 @@
 #include "ndd.hpp"
 
 
-bool IndexManager::newcreateIndex(std::string& index_name, UserType user_type,
+std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
+                                    UserType user_type, std::string& index_name,
                                     std::vector<struct NewIndexConfig> dense_indexes,
                                     std::vector<struct SparseIndexConfig> sparse_indexes)
 {
-    for(int i=0; i<dense_indexes.size(); i++){
-        printf("%s: name:%s, M:%zu\n", __func__, dense_indexes[i].sub_index_name.c_str(), dense_indexes[i].M);
+    std::pair<bool, std::string> ret;
+    struct NewIndexConfig dense_index;
+    ret.first = true;
+    ret.second = "";
+
+    // for(int i=0; i<dense_indexes.size(); i++){
+    //     printf("%s: name:%s, M:%zu\n", __func__, dense_indexes[i].sub_index_name.c_str(), dense_indexes[i].M);
+    // }
+
+    // for(int i=0; i<sparse_indexes.size(); i++){
+    //     printf("%s: name:%s, sparse_dim:%zu\n", __func__, sparse_indexes[i].sub_index_name.c_str(), sparse_indexes[i].sparse_dim);
+    // }
+
+    /**
+     * Check if indexname already exists
+     */
+    std::string index_id =  username + "/" + index_name;
+    auto existing_indices = metadata_manager_->listUserIndexes(username);
+    for(const auto& existing : existing_indices) {
+        if(existing.first == index_name) {
+            throw std::runtime_error("Index with this name already exists for this user");
+        }
+    }
+    std::string index_path = data_dir_ + "/" + index_id + "/main.idx";
+    if(std::filesystem::exists(index_path)) {
+        ret.first = false;
+        ret.second = "index_path exists for index_name: " + index_name;
+        goto exit_newcreateIndex;
     }
 
-    for(int i=0; i<sparse_indexes.size(); i++){
-        printf("%s: name:%s, sparse_dim:%zu\n", __func__, sparse_indexes[i].sub_index_name.c_str(), sparse_indexes[i].sparse_dim);
+    /**
+     * Check limits for this user's type
+     */
+
+    for(int i=0; i< dense_indexes.size(); i++){
+        dense_index = dense_indexes[i];
+
+        /**
+         * Check limits for this user's type
+         */
+        if(dense_index.size_in_millions > getMaxVectorsPerIndex(user_type)){
+            ret.first = false;
+            ret.second = "Size in millions is greater than max allowed";
+        }
     }
-    return true;
+
+exit_newcreateIndex:
+    return ret;
 }
 
 

@@ -815,10 +815,11 @@ public:
         }
     }
 
-    bool newcreateIndex(std::string& index_name,
-                        UserType user_type,
-                        std::vector<struct NewIndexConfig> dense_indexes,
-                        std::vector<struct SparseIndexConfig> sparse_indexes);
+    std::pair<bool, std::string> newcreateIndex(std::string& username,
+                                    UserType user_type, std::string& index_name,
+                                    std::vector<struct NewIndexConfig> dense_indexes,
+                                    std::vector<struct SparseIndexConfig> sparse_indexes);
+
 
     bool createIndex(const std::string& index_id,
                      const IndexConfig& config,

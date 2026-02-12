@@ -307,8 +307,6 @@ int main(int argc, char** argv) {
              * validate_index_name in ndd.cpp
              */
             std::string index_name = std::string(body["index_name"].s());
-            // std::string index_id = ctx.username + "/" + index_name;
-            // std::cout << "index id: " << index_id << "\n";
 
             /**
              * TODO: add a simple case where no named vectors are present.
@@ -465,12 +463,22 @@ int main(int argc, char** argv) {
                 }
             }
 
+            /**
+             * TODO:CRITICAL Add a sparse sanity test here.
+            */
+
             // for(int i=0; i<sparse_indexes.size(); i++){
             //     printf("name:%s, sparse_dim:%zu\n", sparse_indexes[i].sub_index_name.c_str(), sparse_indexes[i].sparse_dim);
             // }
 
-            if(!index_manager.newcreateIndex(index_name, UserType::Admin, dense_indexes, sparse_indexes)){
-                return json_error(400, "failed createNewIndex");
+            std::pair<bool, std::string> create_index_ret =
+                            index_manager.newcreateIndex(ctx.username,
+                                                        UserType::Admin,
+                                                        index_name,
+                                                        dense_indexes,
+                                                        sparse_indexes);
+            if(!create_index_ret.first){
+                return json_error(400, "failed createNewIndex: " + create_index_ret.second);
             }
             return crow::response(200, "Index created successfully");
 

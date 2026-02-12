@@ -27,7 +27,7 @@ inline int getMaxAllowedIndices(UserType type) {
 
 // Get max vectors per index - No limits in open-source mode
 inline size_t getMaxVectorsPerIndex(UserType type) {
-    return settings::MAX_VECTORS_ADMIN;  // 1 billion vectors
+    return settings::MAX_VECTORS_MILLION;  // 1 billion vectors
 }
 
 struct User {

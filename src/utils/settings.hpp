@@ -68,8 +68,8 @@ namespace settings {
     constexpr uint16_t BLOCK_SPLIT_THRESHOLD =
             160;  // Bloc will be split if more than this many elements (including tombstones)
 
-    // Maximum number of elements in the index
-    constexpr size_t MAX_VECTORS_ADMIN = 1'000'000'000;
+    // Maximum number of elements in an index in millions
+    constexpr size_t MAX_VECTORS_MILLION = 10'000; //1 billion
 
     // Buffer for early exit in search base layer
     constexpr int EARLY_EXIT_BUFFER_INSERT = 16;
