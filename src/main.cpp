@@ -179,20 +179,6 @@ bool file_exists(const std::string& path) {
     return std::filesystem::exists(path) && std::filesystem::is_regular_file(path);
 }
 
-// Generate a download key: SHA1(backup_name + AUTH_TOKEN)
-std::string generate_download_key(const std::string& backup_name) {
-    std::string input = backup_name;
-    sha1::SHA1 hasher;
-    hasher.processBytes(input.data(), input.size());
-    sha1::SHA1::digest32_t digest;
-    hasher.getDigest(digest);
-    char hex[41];
-    snprintf(hex, sizeof(hex),
-             "%08x%08x%08x%08x%08x",
-             digest[0], digest[1], digest[2], digest[3], digest[4]);
-    return std::string(hex);
-}
-
 int main(int argc, char** argv) {
 
     if(!is_cpu_compatible()) {
@@ -500,20 +486,20 @@ int main(int argc, char** argv) {
                 }
             });
 
-    // Download Backup - uses download key instead of auth middleware
+    // Download Backup - accepts auth token via query param or works without auth if disabled
     CROW_ROUTE(app, "/api/v1/backups/<string>/download")
             .methods("GET"_method)([&](const crow::request& req,
                                        crow::response& res,
                                        const std::string& backup_name) {
                 try {
-                    std::string key = req.url_params.get("key") ? req.url_params.get("key") : "";
-                    std::string expected_key = generate_download_key(backup_name);
-
-                    if(key != expected_key) {
-                        res.code = 401;
-                        res.write(R"({"error":"Invalid download key"})");
-                        res.end();
-                        return;
+                    if(settings::AUTH_ENABLED) {
+                        std::string token = req.url_params.get("token") ? req.url_params.get("token") : "";
+                        if(token != settings::AUTH_TOKEN) {
+                            res.code = 401;
+                            res.write(R"({"error":"Unauthorized"})");
+                            res.end();
+                            return;
+                        }
                     }
 
                     std::string backup_file =
