@@ -75,14 +75,29 @@ struct IndexInfo {
 };
 
 
-struct SubDenseCacheEntry{
-    // struct CacheEntry* cache_entry;
-    std::shared_ptr<VectorStorage> vector_storage;
+struct DenseCacheSubEntry{
+    // struct CacheEntry* cache_entry; //back connection if required
+    std::shared_ptr<VectorStore> vector_store;
     std::unique_ptr<hnswlib::HierarchicalNSW<float>> alg;
     // Number of searches performed on this sub index. For a search with k=10 it will be 10
     size_t searchCount{0};
     // Per-sub-index operation mutex for coordinating addVectors, saveIndex, deleteVectors
     std::mutex operation_mutex;
+
+    VectorStore::Cursor getCursor(){
+        return vector_store->getCursor();
+    }
+
+    ndd::quant::QuantizationLevel getQuantLevel() const {
+        return vector_store->getQuantLevel();
+    }
+
+    size_t dimension() const {
+        return vector_store->dimension();
+    }
+    size_t get_vector_size() const {
+        return vector_store->get_vector_size();
+    }
 };
 
 struct SubSparseCacheEntry{
@@ -94,15 +109,24 @@ struct SubSparseCacheEntry{
 };
 
 struct NewCacheEntry {
-    std::string index_id;
+    std::string index_id; //of the form "username/indexname"
     std::shared_ptr<IDMapper> id_mapper;
-    std::unordered_map<std::string, std::shared_ptr<SubDenseCacheEntry>> dense_vectors;
+    std::unordered_map<std::string, std::shared_ptr<DenseCacheSubEntry>> dense_vectors;
     std::unordered_map<std::string, std::shared_ptr<SubSparseCacheEntry>> sparse_vectors;
     std::chrono::system_clock::time_point last_access;
     std::chrono::system_clock::time_point last_saved_at;
     std::chrono::system_clock::time_point updated_at;
+
+    std::unique_ptr<Filter> filter_store_;
+    std::unique_ptr<MetaStore> meta_store_;
+
+    // Flag to indicate if the index has been updated
     bool updated{false};
+
+    // Number of searches performed on this index. For a search with k=10 it will be 10
     size_t searchCount{0};
+
+    // Per-index operation mutex for coordinating
     std::mutex operation_mutex;
 
     // Delete copy and move (mutex is non-movable)
@@ -113,9 +137,10 @@ struct NewCacheEntry {
 
     // Factory method — returns nullptr on validation failure
     [[nodiscard]] static std::unique_ptr<NewCacheEntry> create(
+        std::string base_path,
         std::string index_id_,
         std::shared_ptr<IDMapper> id_mapper_,
-        std::unordered_map<std::string, std::shared_ptr<SubDenseCacheEntry>> dense_,
+        std::unordered_map<std::string, std::shared_ptr<DenseCacheSubEntry>> dense_,
         std::unordered_map<std::string, std::shared_ptr<SubSparseCacheEntry>> sparse_,
         std::chrono::system_clock::time_point access_time_)
     {
@@ -129,7 +154,7 @@ struct NewCacheEntry {
         }
         // Private constructor — only accessible via this factory
         return std::unique_ptr<NewCacheEntry>(
-            new NewCacheEntry(std::move(index_id_),
+            new NewCacheEntry(std::move(base_path), std::move(index_id_),
                                 std::move(id_mapper_),
                                 std::move(dense_),
                                 std::move(sparse_),
@@ -143,10 +168,29 @@ struct NewCacheEntry {
 
     void resetSearchCount() { searchCount = 0; }
 
+    void updateFilter(ndd::idInt numeric_id, const std::string& new_filter_json) {
+        // Get existing meta
+        auto meta = meta_store_->get_meta(numeric_id);
+
+        // Remove old filters
+        if(!meta.filter.empty()) {
+            filter_store_->remove_filters_from_json(numeric_id, meta.filter);
+        }
+
+        // Update meta
+        meta.filter = new_filter_json;
+        meta_store_->store_meta(numeric_id, meta);
+
+        // Add new filters
+        if(!new_filter_json.empty()) {
+            filter_store_->add_filters_from_json(numeric_id, new_filter_json);
+        }
+    }
+
 private:
-    NewCacheEntry(std::string index_id_,
+    NewCacheEntry(std::string base_path, std::string index_id_,
                     std::shared_ptr<IDMapper> id_mapper_,
-                    std::unordered_map<std::string, std::shared_ptr<SubDenseCacheEntry>> dense_,
+                    std::unordered_map<std::string, std::shared_ptr<DenseCacheSubEntry>> dense_,
                     std::unordered_map<std::string, std::shared_ptr<SubSparseCacheEntry>> sparse_,
                     std::chrono::system_clock::time_point access_time_)
         : index_id(std::move(index_id_))
@@ -155,7 +199,10 @@ private:
         , sparse_vectors(std::move(sparse_))
         , last_access(access_time_)
         , last_saved_at(std::chrono::system_clock::now())
-    {}
+    {
+        meta_store_ = std::make_unique<MetaStore>(base_path + "/meta");
+        filter_store_ = std::make_unique<Filter>(base_path + "/filters");
+    }
 };
 
 
@@ -250,6 +297,7 @@ class IndexManager {
 private:
     std::deque<std::string> indices_list_;
     std::unordered_map<std::string, CacheEntry> indices_;
+    std::unordered_map<std::string, std::unique_ptr<NewCacheEntry>> newindices_; //index name -> its cache entry
     std::shared_mutex indices_mutex_;
     std::string data_dir_;
     // This is for locking the LRU

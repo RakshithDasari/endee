@@ -23,9 +23,9 @@ std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
     std::error_code ec;
     bool committed = false;
     std::string index_path = "";
-    std::unordered_map<std::string, std::shared_ptr<SubDenseCacheEntry>> dense_map;
-    std::unordered_map<std::string, std::shared_ptr<SubSparseCacheEntry>> sparse_map;
-    std::shared_ptr<SubDenseCacheEntry> dense_sub_index_cache;
+    std::unordered_map<std::string, std::shared_ptr<DenseCacheSubEntry>> dense_cache_map;
+    std::unordered_map<std::string, std::shared_ptr<SubSparseCacheEntry>> sparse_cache_map;
+    std::shared_ptr<DenseCacheSubEntry> dense_sub_index_cache;
     std::shared_ptr<SubSparseCacheEntry> sparse_sub_index_cache;
 
     // Cleanup guard — removes partial artifacts if we don't reach commit
@@ -79,13 +79,26 @@ std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
     //             << index_id << " with user type: " << userTypeToString(user_type));
 
     try{
-        std::string lmdb_dir = data_dir_ + "/" + index_id + "/ids";
+        std::string lmdb_dir = index_path + "/ids";
+        std::string vec_data_dir = index_path + "/vectors";
+
+        /**
+         * TODO: add error handing while creating directories here.
+         * check duplicate creates for the same name.
+         */
+
+        std::filesystem::create_directory(index_path);
+        std::filesystem::create_directory(vec_data_dir);
+
         auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, true, user_type);
-        std::filesystem::create_directory(data_dir_ + "/" + index_id + "/vectors");
+
+        //TODO
+        // cache_entry.meta_store_ = std::make_unique<MetaStore>(vec_data_dir + "/meta");
+        // cache_entry.filter_store_ = std::make_unique<Filter>(vec_data_dir + "/filters");
 
         for(int i=0; i< dense_indexes.size(); i++){
             auto& dense_sub_index = dense_indexes[i];
-            dense_sub_index_cache = std::make_shared<SubDenseCacheEntry>();
+            dense_sub_index_cache = std::make_shared<DenseCacheSubEntry>();
 
             /**
              * Check limits for this user's type
@@ -99,24 +112,70 @@ std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
             std::cout << "space type: " << dense_sub_index.space_type_str << "\n";
             hnswlib::SpaceType space_type = hnswlib::getSpaceType(dense_sub_index.space_type_str);
 
-            std::string vector_storage_dir = data_dir_ + "/" + index_id + "/vectors" + "/vectors_" + dense_sub_index.sub_index_name;
-            if(!std::filesystem::create_directory(vector_storage_dir)){
-                if (std::filesystem::exists(vector_storage_dir)) {
-                    throw std::runtime_error("Duplicate named sub index: " + dense_sub_index.sub_index_name);
-                }else{
-                    throw std::runtime_error("Error: while creating Folder" + vector_storage_dir);
-                }
+            dense_sub_index_cache->vector_store = std::make_shared<VectorStore>(
+                                vec_data_dir + "/vectors_" + dense_sub_index.sub_index_name,
+                                dense_sub_index.dim, dense_sub_index.quant_level);
+
+
+            dense_sub_index_cache->alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(
+                                                            dense_sub_index.max_elements,
+                                                            space_type,
+                                                            dense_sub_index.dim,
+                                                            dense_sub_index.M,
+                                                            dense_sub_index.ef_construction,
+                                                            settings::RANDOM_SEED,
+                                                            dense_sub_index.quant_level,
+                                                            dense_sub_index.checksum);
+
+            dense_sub_index_cache->alg->setVectorFetcher([vs = dense_sub_index_cache->vector_store]
+                    (ndd::idInt label, uint8_t* buffer) {
+                        return vs->get_vector_bytes(label, buffer);
+                    }
+            );
+
+            /* add this dense_sub_index_cache entry to dense_map*/
+            auto[it, inserted] = dense_cache_map.insert({dense_sub_index.space_type_str, std::move(dense_sub_index_cache)});
+            if(!inserted){
+                LOG_INFO("Duplicate sub index name: " + dense_sub_index.space_type_str);
+                ret.first = false;
+                ret.second = "duplicate sub index_name: " + dense_sub_index.space_type_str;
+                goto exit_newcreateIndex_cleanup;
+            }
+        }
+
+        /**
+         * TODO: Do a for loop for all sparse vectors
+         */
+
+
+        //add NewCacheEntry against index name to IndexManager.newindices_
+        {
+            auto cache_entry = NewCacheEntry::create(index_path, index_id, id_mapper,
+                                                                    std::move(dense_cache_map),
+                                                                    std::move(sparse_cache_map),
+                                                                    std::chrono::system_clock::now());
+            if(!cache_entry){
+                ret.first = false;
+                ret.second = "unable to allocate NewCacheEntry";
+                goto exit_newcreateIndex_cleanup;
             }
 
+            std::unique_lock<std::shared_mutex> lock(indices_mutex_);
+
+            auto[it, inserted] = newindices_.emplace(index_id, std::move(cache_entry));
+            if(!inserted){
+                ret.first = false;
+                ret.second = "found a duplicate entry in newindices_";
+                goto exit_newcreateIndex_cleanup;
+            }
+            it->second->markUpdated();
+            indices_list_.push_front(index_id);
+
             /**
-             * Check if there is a duplicate sub index from the filesystem.
+             * TODO: print and test all the vector entries here.
              */
-
-            // dense_sub_index_cache->vector_storage = std::make_shared<VectorStorage>(vector_storage_dir,
-            //                                                                 dense_sub_index.dim,
-            //                                                                 dense_sub_index.quant_level);
-
         }
+
     } catch (...){
         cleanup();
         throw;
