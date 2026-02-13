@@ -375,7 +375,7 @@ public:
 
     // Batch add operation for filters
     void add_to_filter_batch(const std::string& filter_key,
-                             const std::vector<ndd::idInt>& numeric_ids) {
+                                const std::vector<ndd::idInt>& numeric_ids) {
         if(numeric_ids.empty()) {
             return;
         }
@@ -518,6 +518,16 @@ public:
         }
     }
 
+    /**
+     * Deletes filter only.
+     * This duplicate function is added here from its misplaced implementation in 
+     * class VectorStorage.
+     * XXX: Should be removed later for code readability
+     */
+    void deleteFilter(ndd::idInt numeric_id, std::string filter) {
+        remove_filters_from_json(numeric_id, filter);
+    }
+
     // Combine multiple filters using AND operation
     ndd::RoaringBitmap
     combine_filters_and(const std::vector<std::pair<std::string, std::string>>& filters) const {
@@ -546,9 +556,9 @@ public:
 
     // Check if ID satisfies a numeric condition using Forward Index
     bool check_numeric(const std::string& field,
-                       ndd::idInt id,
-                       const std::string& op,
-                       const nlohmann::json& val) const {
+                        ndd::idInt id,
+                        const std::string& op,
+                        const nlohmann::json& val) const {
         if(op == "$eq") {
             uint32_t sortable_val;
             if(val.is_number_integer()) {
