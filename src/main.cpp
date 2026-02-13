@@ -418,7 +418,8 @@ int main(int argc, char** argv) {
             }
 
             // for(int i=0; i<dense_indexes.size(); i++){
-            //     printf("name:%s, M:%zu\n", dense_indexes[i].sub_index_name.c_str(), dense_indexes[i].M);
+            //     printf("name:%s, M:%zu, space_type:%s\n",
+            //         dense_indexes[i].sub_index_name.c_str(), dense_indexes[i].M, dense_indexes[i].space_type_str.c_str());
             // }
 
             std::vector<struct SparseIndexConfig> sparse_indexes;

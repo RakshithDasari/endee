@@ -74,6 +74,91 @@ struct IndexInfo {
     size_t ef_con;
 };
 
+
+struct SubDenseCacheEntry{
+    // struct CacheEntry* cache_entry;
+    std::shared_ptr<VectorStorage> vector_storage;
+    std::unique_ptr<hnswlib::HierarchicalNSW<float>> alg;
+    // Number of searches performed on this sub index. For a search with k=10 it will be 10
+    size_t searchCount{0};
+    // Per-sub-index operation mutex for coordinating addVectors, saveIndex, deleteVectors
+    std::mutex operation_mutex;
+};
+
+struct SubSparseCacheEntry{
+    std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
+    // Number of searches performed on this sub index. For a search with k=10 it will be 10
+    size_t searchCount{0};
+    // Per-sub-index operation mutex for coordinating addVectors, saveIndex, deleteVectors
+    std::mutex operation_mutex;
+};
+
+struct NewCacheEntry {
+    std::string index_id;
+    std::shared_ptr<IDMapper> id_mapper;
+    std::unordered_map<std::string, std::shared_ptr<SubDenseCacheEntry>> dense_vectors;
+    std::unordered_map<std::string, std::shared_ptr<SubSparseCacheEntry>> sparse_vectors;
+    std::chrono::system_clock::time_point last_access;
+    std::chrono::system_clock::time_point last_saved_at;
+    std::chrono::system_clock::time_point updated_at;
+    bool updated{false};
+    size_t searchCount{0};
+    std::mutex operation_mutex;
+
+    // Delete copy and move (mutex is non-movable)
+    NewCacheEntry(const NewCacheEntry&) = delete;
+    NewCacheEntry& operator=(const NewCacheEntry&) = delete;
+    NewCacheEntry(NewCacheEntry&&) = delete;
+    NewCacheEntry& operator=(NewCacheEntry&&) = delete;
+
+    // Factory method — returns nullptr on validation failure
+    [[nodiscard]] static std::unique_ptr<NewCacheEntry> create(
+        std::string index_id_,
+        std::shared_ptr<IDMapper> id_mapper_,
+        std::unordered_map<std::string, std::shared_ptr<SubDenseCacheEntry>> dense_,
+        std::unordered_map<std::string, std::shared_ptr<SubSparseCacheEntry>> sparse_,
+        std::chrono::system_clock::time_point access_time_)
+    {
+        if (!id_mapper_) {
+            LOG_ERROR("ID Mapper is null for index: " << index_id_);
+            return nullptr;
+        }
+        if (dense_.empty()) {
+            LOG_ERROR("Must have at least one dense sub-index for index: " << index_id_);
+            return nullptr;
+        }
+        // Private constructor — only accessible via this factory
+        return std::unique_ptr<NewCacheEntry>(
+            new NewCacheEntry(std::move(index_id_),
+                                std::move(id_mapper_),
+                                std::move(dense_),
+                                std::move(sparse_),
+                                access_time_));
+    }
+
+    void markUpdated() {
+        updated = true;
+        updated_at = std::chrono::system_clock::now();
+    }
+
+    void resetSearchCount() { searchCount = 0; }
+
+private:
+    NewCacheEntry(std::string index_id_,
+                    std::shared_ptr<IDMapper> id_mapper_,
+                    std::unordered_map<std::string, std::shared_ptr<SubDenseCacheEntry>> dense_,
+                    std::unordered_map<std::string, std::shared_ptr<SubSparseCacheEntry>> sparse_,
+                    std::chrono::system_clock::time_point access_time_)
+        : index_id(std::move(index_id_))
+        , id_mapper(std::move(id_mapper_))
+        , dense_vectors(std::move(dense_))
+        , sparse_vectors(std::move(sparse_))
+        , last_access(access_time_)
+        , last_saved_at(std::chrono::system_clock::now())
+    {}
+};
+
+
 struct CacheEntry {
     std::string index_id;
     size_t sparse_dim = 0;

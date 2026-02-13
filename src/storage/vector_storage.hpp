@@ -494,17 +494,20 @@ public:
     std::unique_ptr<Filter> filter_store_;
 
     VectorStorage(const std::string& base_path,
-                  size_t vector_dim,
-                  ndd::quant::QuantizationLevel quant_level) {
+                    size_t vector_dim,
+                    ndd::quant::QuantizationLevel quant_level)
+    {
         vector_store_ =
                 std::make_unique<VectorStore>(base_path + "/vectors", vector_dim, quant_level);
         meta_store_ = std::make_unique<MetaStore>(base_path + "/meta");
         filter_store_ = std::make_unique<Filter>(base_path + "/filters");
     }
-    VectorStore::Cursor getCursor() { return vector_store_->getCursor(); }
+
+
     // Get numeric ids of matching filters
-    std::vector<ndd::idInt> getIdsMatchingFilters(
-            const std::vector<std::pair<std::string, std::string>>& filter_pairs) const {
+    std::vector<ndd::idInt> getIdsMatchingFilters(const std::vector<std::pair<std::string,
+                                                    std::string>>& filter_pairs) const
+    {
         auto bitmap = filter_store_->combine_filters_and(filter_pairs);
         std::vector<ndd::idInt> numeric_ids;
         bitmap.iterate(
@@ -519,7 +522,8 @@ public:
 
     bool matches_filter(ndd::idInt numeric_id,
                         const ndd::VectorMeta& meta,
-                        const nlohmann::json& filter_query) {
+                        const nlohmann::json& filter_query)
+    {
         if(filter_query.empty()) {
             return true;
         }
@@ -702,9 +706,10 @@ public:
             meta_store_->remove(numeric_id);
         } catch(const std::exception& e) {
             throw std::runtime_error(std::string("Failed to remove vector and metadata: ")
-                                     + e.what());
+                                        + e.what());
         }
     }
+
     // Deletes filter only.
     void deleteFilter(ndd::idInt numeric_id, std::string filter) {
         filter_store_->remove_filters_from_json(numeric_id, filter);
@@ -730,7 +735,9 @@ public:
         }
     }
 
+    VectorStore::Cursor getCursor(){ return vector_store_->getCursor();}
     ndd::quant::QuantizationLevel getQuantLevel() const { return vector_store_->getQuantLevel(); }
     size_t dimension() const { return vector_store_->dimension(); }
     size_t get_vector_size() const { return vector_store_->get_vector_size(); }
+
 };
