@@ -565,25 +565,6 @@ public:
         return meta_store_->get_meta(numeric_id);
     }
 
-    // NOT used anymore. Deletes filter, meta and vector data.
-    void deletePoint(ndd::idInt numeric_id) {
-        try {
-            // Get metadata first to get filter info
-            auto meta = meta_store_->get_meta(numeric_id);
-
-            // Remove filter entries if they exist
-            if(!meta.filter.empty()) {
-                filter_store_->remove_filters_from_json(numeric_id, meta.filter);
-            }
-            // Try to remove both vector and meta data
-            vector_store_->remove(numeric_id);
-            meta_store_->remove(numeric_id);
-        } catch(const std::exception& e) {
-            throw std::runtime_error(std::string("Failed to remove vector and metadata: ")
-                                        + e.what());
-        }
-    }
-
     // Deletes filter only.
     void deleteFilter(ndd::idInt numeric_id, std::string filter) {
         filter_store_->remove_filters_from_json(numeric_id, filter);
