@@ -42,6 +42,27 @@ namespace ndd {
         MSGPACK_DEFINE(id, meta, filter, norm, vector)
     };
 
+    struct DenseVectorObject{
+        float norm;                        // Vector norm (only for cosine distance)
+        std::vector<float> vector;         // Vector data
+    };
+
+    struct SparseVectorObject{
+        std::vector<uint32_t> sparse_ids;  // Sparse vector indices
+        std::vector<float> sparse_values;  // Sparse vector values
+    };
+
+    struct GenericVectorObject {
+        std::string id;                    // String identifier
+        std::vector<uint8_t> meta;         // Binary metadata (zipped)
+        std::string filter;                // Filter as JSON string
+
+        std::unordered_map<std::string, struct DenseVectorObject> dense_vectors;
+        std::unordered_map<std::string, struct SparseVectorObject> sparse_vectors;
+
+        // MSGPACK_DEFINE(id, meta, filter, norm, vector, sparse_ids, sparse_values)
+    };
+
     struct HybridVectorObject {
         std::string id;                    // String identifier
         std::vector<uint8_t> meta;         // Binary metadata (zipped)

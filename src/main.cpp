@@ -847,7 +847,7 @@ int main(int argc, char** argv) {
     CROW_ROUTE(app, "/api/v1/index/<string>/search")
             .CROW_MIDDLEWARES(app, AuthMiddleware)
             .methods("POST"_method)([&index_manager, &app](const crow::request& req,
-                                                           std::string index_name) {
+                                                            std::string index_name) {
                 auto& ctx = app.get_context<AuthMiddleware>(req);
                 // Format full index_id
                 std::string index_id = ctx.username + "/" + index_name;
@@ -957,11 +957,164 @@ int main(int argc, char** argv) {
                 }
             });
 
+    //  newinsert a list of vectors
+    CROW_ROUTE(app, "/api/v1/index/<string>/vector/newinsert")
+            .CROW_MIDDLEWARES(app, AuthMiddleware)
+            .methods("POST"_method)([&index_manager, &app](const crow::request& req,
+                                                            std::string index_name) {
+        auto& ctx = app.get_context<AuthMiddleware>(req);
+        std::string index_id = ctx.username + "/" + index_name;
+        auto content_type = req.get_header_value("Content-Type");
+
+        std::vector<ndd::GenericVectorObject> vectors;
+
+        if(content_type == "application/json"){
+            auto body = crow::json::load(req.body);
+            if(!body) {
+                return json_error(400, "Invalid JSON");
+            }
+
+            if(body.t() == crow::json::type::List) {
+                for(const auto& item : body) {
+                    ndd::GenericVectorObject gvo;
+
+                    for(const auto& kv : item){
+                        std::string key = kv.key();
+                        if(key == "id"){
+                            if(kv.t() != crow::json::type::String) {
+                                return json_error(400, "Parameter error: 'id' must be a string");
+                            }
+                            gvo.id = kv.s();
+                            continue;
+                        }
+
+                        if(key == "meta") {
+                            if(kv.t() != crow::json::type::String) {
+                                return json_error(400, "Parameter error: 'meta' must be a string");
+                            }
+                            std::string meta_str = kv.s();
+                            gvo.meta.assign(meta_str.begin(), meta_str.end());
+                            continue;
+                        }
+
+                        if(key == "filter") {
+                            if(kv.t() != crow::json::type::String) {
+                                return json_error(400, "Parameter error: 'filter' must be a string");
+                            }
+                            gvo.filter = kv.s();
+                            continue;
+                        }
+
+                        /*This should be a named vector*/
+
+                        if(kv.t() != crow::json::type::Object) {
+                            return json_error(400, "Field '" + key + "' must be an object");
+                        }
+
+                        /*Dense vector*/
+                        if(kv.has("vector") && kv.has("norm")) {
+                            if(kv["vector"].t() != crow::json::type::List) {
+                                return json_error(400, "Dense vector '" + key + "': 'vector' must be an array");
+                            }
+                            ndd::DenseVectorObject dvo;
+                            dvo.norm = static_cast<float>(kv["norm"].d());
+                            for(const auto& val : kv["vector"]) {
+                                dvo.vector.push_back(static_cast<float>(val.d()));
+                            }
+                            /**
+                             * TODO: Add a check for duplicate keys here
+                             */
+                            gvo.dense_vectors[key] = std::move(dvo);
+                            continue;
+                        }
+
+                        /*Sparse vector*/
+                        if(kv.has("sparse_indices") && kv.has("sparse_values")) {
+                            if(kv["sparse_indices"].t() != crow::json::type::List ||
+                            kv["sparse_values"].t() != crow::json::type::List) {
+                                return json_error(400,
+                                    "Sparse vector '" + key + "': 'sparse_indices' and 'sparse_values' must be arrays");
+                            }
+                            if(kv["sparse_indices"].size() != kv["sparse_values"].size()) {
+                                return json_error(400,
+                                    "Sparse vector '" + key + "': sparse_indices and sparse_values must have same length");
+                            }
+
+                            ndd::SparseVectorObject svo;
+                            for(const auto& idx : kv["sparse_indices"]) {
+                                svo.sparse_ids.push_back(static_cast<uint32_t>(idx.i()));
+                            }
+                            for(const auto& val : kv["sparse_values"]) {
+                                svo.sparse_values.push_back(static_cast<float>(val.d()));
+                            }
+                            /**
+                             * TODO: Add a check for duplicate keys here
+                             */
+                            gvo.sparse_vectors[key] = std::move(svo);
+                            continue;
+                        }
+
+                        /**
+                         * At this point the request hasn't
+                         * fallen in any of the categories.
+                         */
+                        return json_error(400, "Format error");
+                    }
+                    vectors.push_back(std::move(gvo));
+                }
+            }else{
+                return crow::response(400, "Body should be a list.");
+            }
+            // return crow::response(400,
+            //         "Content-Type application/json not implemented yet");
+
+            /**
+             * TODO: Test if all the inserts actually do come in vectors
+             */
+            // Debug: print all inserted vectors
+            for (const auto& gvo : vectors) {
+                std::cout << "=== Vector ID: " << gvo.id << " ===" << std::endl;
+                std::cout << "  Filter: " << gvo.filter << std::endl;
+                std::cout << "  Meta: " << std::string(gvo.meta.begin(), gvo.meta.end()) << std::endl;
+
+                for (const auto& [name, dvo] : gvo.dense_vectors) {
+                    std::cout << "  Dense [" << name << "] norm=" << dvo.norm << " vector=[";
+                    for (size_t i = 0; i < dvo.vector.size(); ++i) {
+                        if (i > 0) std::cout << ", ";
+                        std::cout << dvo.vector[i];
+                    }
+                    std::cout << "]" << std::endl;
+                }
+
+                for (const auto& [name, svo] : gvo.sparse_vectors) {
+                    std::cout << "  Sparse [" << name << "] indices=[";
+                    for (size_t i = 0; i < svo.sparse_ids.size(); ++i) {
+                        if (i > 0) std::cout << ", ";
+                        std::cout << svo.sparse_ids[i] << ":" << svo.sparse_values[i];
+                    }
+                    std::cout << "]" << std::endl;
+                }
+            }
+            std::cout << "Total vectors inserted: " << vectors.size() << std::endl;
+
+            bool success = true; //= index_manager.addVectors(index_id, vectors);
+            return crow::response(success ? 200 : 400);
+        }
+        else if(content_type == "application/msgpack"){
+            return crow::response(400,
+                    "Content-Type application/msgpack not implemented yet");
+        }
+        else{
+            return crow::response(400,
+                    "Content-Type must be application/msgpack or application/json");
+        }
+    });
+
     //  Insert a list of vectors
     CROW_ROUTE(app, "/api/v1/index/<string>/vector/insert")
             .CROW_MIDDLEWARES(app, AuthMiddleware)
             .methods("POST"_method)([&index_manager, &app](const crow::request& req,
-                                                           std::string index_name) {
+                                                            std::string index_name) {
                 auto& ctx = app.get_context<AuthMiddleware>(req);
                 std::string index_id = ctx.username + "/" + index_name;
 
