@@ -29,6 +29,7 @@ std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
     std::shared_ptr<SubSparseCacheEntry> sparse_sub_index_cache;
 
     // Cleanup guard — removes partial artifacts if we don't reach commit
+    // TODO: This function is not complete
     auto cleanup = [&]() {
         if (committed)
             return;
@@ -51,16 +52,15 @@ std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
     auto existing_indices = metadata_manager_->listUserIndexes(username);
     for(const auto& existing : existing_indices) {
         if(existing.first == index_name) {
-            throw std::runtime_error("Index with this name already exists for this user");
+            ret.first = false;
+            ret.second = "index_name: " + index_name + " already exists.";
+            goto exit_newcreateIndex;
         }
     }
     // check if it exists in the filesystem
     index_path = data_dir_ + "/" + index_id;
     if(std::filesystem::exists(index_path)) {
-        // throw std::runtime_error("Index with this name already exists for this user");
-        ret.first = false;
-        ret.second = "index_name: " + index_name + " already exists.";
-        goto exit_newcreateIndex;
+        throw std::runtime_error("index_name: " + index_name + " already exists.");
     }
 
     // Check if there is enough space on the disk
@@ -91,10 +91,6 @@ std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
         std::filesystem::create_directory(vec_data_dir);
 
         auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, true, user_type);
-
-        //TODO
-        // cache_entry.meta_store_ = std::make_unique<MetaStore>(vec_data_dir + "/meta");
-        // cache_entry.filter_store_ = std::make_unique<Filter>(vec_data_dir + "/filters");
 
         for(int i=0; i< dense_indexes.size(); i++){
             auto& dense_sub_index = dense_indexes[i];
@@ -134,11 +130,11 @@ std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
             );
 
             /* add this dense_sub_index_cache entry to dense_map*/
-            auto[it, inserted] = dense_cache_map.insert({dense_sub_index.space_type_str, std::move(dense_sub_index_cache)});
+            auto[it, inserted] = dense_cache_map.insert({dense_sub_index.sub_index_name, std::move(dense_sub_index_cache)});
             if(!inserted){
-                LOG_INFO("Duplicate sub index name: " + dense_sub_index.space_type_str);
+                LOG_ERROR("Duplicate sub index name: " + dense_sub_index.sub_index_name);
                 ret.first = false;
-                ret.second = "duplicate sub index_name: " + dense_sub_index.space_type_str;
+                ret.second = "duplicate sub index_name: " + dense_sub_index.sub_index_name;
                 goto exit_newcreateIndex_cleanup;
             }
         }
@@ -146,6 +142,8 @@ std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
         /**
          * TODO: Do a for loop for all sparse vectors
          */
+        // for(int i=0; i< sparse_indexes.size(); i++){
+        // }
 
 
         //add NewCacheEntry against index name to IndexManager.newindices_
@@ -170,12 +168,32 @@ std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
             }
             it->second->markUpdated();
             indices_list_.push_front(index_id);
-
-            /**
-             * TODO: print and test all the vector entries here.
-             */
         }
 
+        /*
+        // TESTING CODE ONLY: Print dense sub-indexes
+        for (const auto& [idx_id, entry] : newindices_) {
+            LOG_INFO("Index: " << entry->index_id);
+
+            // Print dense sub-indexes
+            LOG_INFO("  Dense sub-indexes (" << entry->dense_vectors.size() << "):");
+            for (const auto& [sub_name, dense_entry] : entry->dense_vectors) {
+                LOG_INFO("   subvec_name: [" << sub_name << "]"
+                    << " dim=" << dense_entry->alg->getDimension()
+                    << " max_elements=" << dense_entry->alg->getMaxElements()
+                    << " elements=" << dense_entry->alg->getElementsCount()
+                    << " M=" << dense_entry->alg->getM()
+                    << " ef_construction=" << dense_entry->alg->getEfConstruction()
+                    << " space=" << dense_entry->alg->getSpaceTypeStr()
+                    << " quant=" << static_cast<int>(dense_entry->alg->getQuantLevel())
+                    << " checksum=" << dense_entry->alg->getChecksum()
+                    << " remaining_capacity=" << dense_entry->alg->getRemainingCapacity()
+                );
+            }
+        }
+        */
+
+        goto exit_newcreateIndex;
     } catch (...){
         cleanup();
         throw;
