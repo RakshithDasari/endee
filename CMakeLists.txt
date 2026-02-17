@@ -239,7 +239,7 @@ message(STATUS "Binary name: ${NDD_BINARY_NAME}")
 
 
 # Create the target
-add_executable(${NDD_BINARY_NAME} src/main.cpp src/core/ndd.cpp ${LMDB_SOURCES} third_party/roaring_bitmap/roaring.c)
+add_executable(${NDD_BINARY_NAME} src/main.cpp src/core/ndd.cpp src/storage/id_mapper.cpp ${LMDB_SOURCES} third_party/roaring_bitmap/roaring.c)
 
 # Set MDBX-specific compile flags
 set_source_files_properties(${LMDB_SOURCES} PROPERTIES
