@@ -10,6 +10,11 @@ void insert_or_throw(Map& map, Key&& key, Value&& value) {
     }
 }
 
+/*TODO: Critical*/
+void IndexManager::newloadIndex(const std::string& index_id){
+    std::runtime_error("IndexManager::newloadIndex is not implemented");
+}
+
 std::pair<bool, std::string> IndexManager::newcreateIndex(std::string& username,
                                     UserType user_type, std::string& index_name,
                                     std::vector<struct NewIndexConfig> dense_indexes,
@@ -203,6 +208,123 @@ exit_newcreateIndex_cleanup:
 cleanup();
 
 exit_newcreateIndex:
+    return ret;
+}
+
+
+/**
+ * new impl. of getIndexEntry. Copies the logic as is
+ */
+std::shared_ptr<NewCacheEntry> IndexManager::newgetIndexEntry(std::string &index_id){
+
+    /*First try with reader's lock*/
+    {
+        //std::shared_lock<std::shared_mutex> read_lock(indices_mutex_);
+        auto it = newindices_.find(index_id);
+        if(it != newindices_.end()) {
+            std::cout << __func__ << " it not end() for index_id: " << index_id << std::endl;
+            return it->second;
+        }
+    }
+
+    /*Try with writer's lock*/
+    {
+        /**
+         * XXX: incomplete IMPL. phase. This code snippet should not be called right now.
+         * This is because all the required functions are not implemented.
+         */
+        return nullptr;
+
+        std::unique_lock<std::shared_mutex> write_lock(indices_mutex_);
+            auto it = newindices_.find(index_id);
+            if(it == newindices_.end()) {
+                newloadIndex(index_id);  // modifies indices_ [NOT IMPLEMENTED]
+                evictIfNeeded();      // Clean eviction only
+            }
+            it = newindices_.find(index_id);
+            if(it == newindices_.end()) {
+                return nullptr;
+                // throw std::runtime_error("[ERROR] Failed to load index");
+            }
+            return it->second;
+    }
+}
+
+/**
+ * Adds list of named vectors.
+ */
+std::pair<bool, std::string> IndexManager::addNamedVectors(std::string& index_id,
+                                    std::vector<ndd::GenericVectorObject>& vectors)
+{
+    std::pair<bool, std::string> ret;
+    std::shared_ptr<NewCacheEntry> entry = nullptr;
+    ret.first = true;
+    ret.second = "";
+
+    if(vectors.empty()) {
+        ret.first = false;
+        ret.second = "no vectors to add";
+        LOG_ERROR(ret.second);
+        goto exit_addNamedVectors;
+    }
+
+#if 0
+    std::cout << "index_id: " << index_id << std::endl;
+
+    // Debug: print all inserted vectors
+    for (const auto& gvo : vectors) {
+        std::cout << "=== Vector ID: " << gvo.id << " ===" << std::endl;
+        std::cout << "  Filter: " << gvo.filter << std::endl;
+        std::cout << "  Meta: " << std::string(gvo.meta.begin(), gvo.meta.end()) << std::endl;
+
+        for (const auto& [name, dvo] : gvo.dense_vectors) {
+            std::cout << "  Dense [" << name << "] norm=" << dvo.norm << " vector=[";
+            for (size_t i = 0; i < dvo.vector.size(); ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << dvo.vector[i];
+            }
+            std::cout << "]" << std::endl;
+        }
+
+        for (const auto& [name, svo] : gvo.sparse_vectors) {
+            std::cout << "  Sparse [" << name << "] indices=[";
+            for (size_t i = 0; i < svo.sparse_ids.size(); ++i) {
+                if (i > 0) std::cout << ", ";
+                std::cout << svo.sparse_ids[i] << ":" << svo.sparse_values[i];
+            }
+            std::cout << "]" << std::endl;
+        }
+    }
+    std::cout << "Total vectors inserted: " << vectors.size() << std::endl;
+
+#endif //if 0
+
+    /* Get index from index_id*/
+    entry = newgetIndexEntry(index_id);
+    if(!entry){
+        ret.first = false;
+        ret.second = "Could not find index: " + index_id;
+
+        /*For now*/
+        ret.second += " XXXX: MAYBE THIS IS BECAUSE the IMPLEMENTATION OF newgetIndexEntry is incomplete";
+        LOG_INFO(ret.second);
+        goto exit_addNamedVectors;
+    }
+
+    std::cout << "entry.index_id - " << entry->index_id << std::endl;
+    /* Create intID for each StringID using IDMapper*/
+
+
+
+    /**
+     * TODO: Critical
+     * Skipping usage of WAL right now.
+     * We have to decide if WAL needs to be a per sub-index concept or not
+     */
+
+
+
+exit_addNamedVectors:
     return ret;
 }
 

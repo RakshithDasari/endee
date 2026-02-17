@@ -1067,38 +1067,6 @@ int main(int argc, char** argv) {
             }
             // return crow::response(400,
             //         "Content-Type application/json not implemented yet");
-
-            /**
-             * TODO: Test if all the inserts actually do come in vectors
-             */
-            // Debug: print all inserted vectors
-            for (const auto& gvo : vectors) {
-                std::cout << "=== Vector ID: " << gvo.id << " ===" << std::endl;
-                std::cout << "  Filter: " << gvo.filter << std::endl;
-                std::cout << "  Meta: " << std::string(gvo.meta.begin(), gvo.meta.end()) << std::endl;
-
-                for (const auto& [name, dvo] : gvo.dense_vectors) {
-                    std::cout << "  Dense [" << name << "] norm=" << dvo.norm << " vector=[";
-                    for (size_t i = 0; i < dvo.vector.size(); ++i) {
-                        if (i > 0) std::cout << ", ";
-                        std::cout << dvo.vector[i];
-                    }
-                    std::cout << "]" << std::endl;
-                }
-
-                for (const auto& [name, svo] : gvo.sparse_vectors) {
-                    std::cout << "  Sparse [" << name << "] indices=[";
-                    for (size_t i = 0; i < svo.sparse_ids.size(); ++i) {
-                        if (i > 0) std::cout << ", ";
-                        std::cout << svo.sparse_ids[i] << ":" << svo.sparse_values[i];
-                    }
-                    std::cout << "]" << std::endl;
-                }
-            }
-            std::cout << "Total vectors inserted: " << vectors.size() << std::endl;
-
-            bool success = true; //= index_manager.addVectors(index_id, vectors);
-            return crow::response(success ? 200 : 400);
         }
         else if(content_type == "application/msgpack"){
             return crow::response(400,
@@ -1108,6 +1076,23 @@ int main(int argc, char** argv) {
             return crow::response(400,
                     "Content-Type must be application/msgpack or application/json");
         }
+
+        /* Insert the batch of vectors to the index */
+        try{
+            auto ret = index_manager.addNamedVectors(index_id, vectors);
+
+            if(!ret.first){
+                return json_error(400, ret.second);
+            }
+            return crow::response(200);
+
+        } catch(const std::runtime_error& e) {
+            return json_error(400, e.what());
+        } catch(const std::exception& e) {
+            LOG_DEBUG("Batch insertion failed: " << e.what());
+            return json_error_500(ctx.username, req.url, e.what());
+        }
+
     });
 
     //  Insert a list of vectors
