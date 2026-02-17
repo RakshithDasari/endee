@@ -396,7 +396,7 @@ public:
             int rc = mdbx_txn_commit(txn);
             if(rc != MDBX_SUCCESS) {
                 throw std::runtime_error("Failed to commit transaction: "
-                                         + std::string(mdbx_strerror(rc)));
+                                        + std::string(mdbx_strerror(rc)));
             }
         };
 

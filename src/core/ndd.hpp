@@ -136,7 +136,7 @@ struct NewCacheEntry {
     NewCacheEntry& operator=(NewCacheEntry&&) = delete;
 
     // Factory method — returns nullptr on validation failure
-    [[nodiscard]] static std::unique_ptr<NewCacheEntry> create(
+    [[nodiscard]] static std::shared_ptr<NewCacheEntry> create(
         std::string base_path,
         std::string index_id_,
         std::shared_ptr<IDMapper> id_mapper_,
@@ -153,7 +153,7 @@ struct NewCacheEntry {
             return nullptr;
         }
         // Private constructor — only accessible via this factory
-        return std::unique_ptr<NewCacheEntry>(
+        return std::shared_ptr<NewCacheEntry>(
             new NewCacheEntry(std::move(base_path), std::move(index_id_),
                                 std::move(id_mapper_),
                                 std::move(dense_),
@@ -297,7 +297,7 @@ class IndexManager {
 private:
     std::deque<std::string> indices_list_;
     std::unordered_map<std::string, CacheEntry> indices_;
-    std::unordered_map<std::string, std::unique_ptr<NewCacheEntry>> newindices_; //index name -> its cache entry
+    std::unordered_map<std::string, std::shared_ptr<NewCacheEntry>> newindices_; //index name -> its cache entry
     std::shared_mutex indices_mutex_;
     std::string data_dir_;
     // This is for locking the LRU
@@ -446,6 +446,8 @@ private:
         }
     }
 
+    std::shared_ptr<NewCacheEntry> newgetIndexEntry(std::string& index_id);
+
     // Get index entry with proper lock management - does NOT hold locks after return
     CacheEntry& getIndexEntry(const std::string& index_id) {
         // First try to find the index without write lock
@@ -487,7 +489,6 @@ private:
         saveIndexInternal(entry);
     }
 
-private:
     // Internal saveIndex implementation that doesn't call getIndexEntry
     // Used by functions that already have the entry and mutex
     void saveIndexInternal(CacheEntry& entry) {
@@ -618,7 +619,6 @@ public:
         return getUserPath(username) + "/" + index_name;
     }
 
-public:
     IndexManager(size_t max_indices,
                  const std::string& data_dir,
                  const PersistenceConfig& persistence_config = PersistenceConfig{}) :
@@ -1086,10 +1086,13 @@ public:
         // Use the metadata manager directly to get the list of indexes
         return metadata_manager_->listUserIndexes(username);
     }
+
     std::vector<std::pair<std::string, IndexMetadata>> listAllIndexes() {
         // Use the metadata manager directly to get the list of indexes
         return metadata_manager_->listAllIndexes();
     }
+
+    void newloadIndex(const std::string& index_id);
 
     void loadIndex(const std::string& index_id) {
         std::string index_path = data_dir_ + "/" + index_id + "/main.idx";
@@ -1234,6 +1237,8 @@ public:
         // Replace the algorithm in the existing entry
         entry.alg = std::move(new_alg);
     }
+
+    std::pair<bool, std::string> addNamedVectors(std::string& index_id, std::vector<ndd::GenericVectorObject>& vectors);
 
     template <typename VectorType>
     bool addVectors(const std::string& index_id, const std::vector<VectorType>& vectors) {

@@ -35,7 +35,7 @@ public:
         if(!log_file_) {
             std::string err_string;
             err_string = "Failed to open WAL file: " + log_path_
-                         + " errno: " + std::to_string(errno) + " errcode: " + std::strerror(errno);
+                        + " errno: " + std::to_string(errno) + " errcode: " + std::strerror(errno);
 
             LOG_ERROR(err_string);
             throw std::runtime_error(err_string);
