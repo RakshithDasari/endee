@@ -1350,8 +1350,8 @@ public:
             // Add to HNSW index in parallel using pre-quantized data from QuantVectorObject
             size_t available_threads = settings::NUM_PARALLEL_INSERTS;
             const size_t num_threads = (available_threads < quantized_vectors.size())
-                                               ? available_threads
-                                               : quantized_vectors.size();
+                                                ? available_threads
+                                                : quantized_vectors.size();
             std::vector<std::thread> threads;
             const size_t chunk_size =
                     (quantized_vectors.size() + num_threads - 1) / num_threads;  // Ceiling division
@@ -1362,8 +1362,8 @@ public:
                     // Calculate start and end indices for this thread
                     size_t start_idx = t * chunk_size;
                     size_t end_idx = (start_idx + chunk_size < quantized_vectors.size())
-                                             ? (start_idx + chunk_size)
-                                             : quantized_vectors.size();
+                                                ? (start_idx + chunk_size)
+                                                : quantized_vectors.size();
 
                     // Process assigned chunk of vectors
                     for(size_t i = start_idx; i < end_idx; i++) {

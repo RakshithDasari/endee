@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <set>
 #include "../core/types.hpp"
+#include "../utils/msgpack_ndd.hpp"
 #include "../utils/settings.hpp"
 
 using ndd::idInt;
@@ -79,11 +80,18 @@ public:
         mdbx_env_close(env_);
     }
 
+    /**
+     * is same as create_ids_batch
+     * Takes a vector of ndd::GenericVectorObject and adds the IDs to GenericVectorObject's pair
+     */
+    template <bool use_deleted_ids> bool newcreate_ids_batch(std::vector<ndd::GenericVectorObject>& vectors, void* wal_ptr = nullptr);
+
+
     // Create string ID to numeric ID mapping. If string ids exists in the database, it will return
     // the existing numeric ID along with flag It will also use old numeric IDs of deleted points
     template <bool use_deleted_ids>
     std::vector<std::pair<idInt, bool>> create_ids_batch(const std::vector<std::string>& str_ids,
-                                                         void* wal_ptr = nullptr) {
+                                                        void* wal_ptr = nullptr) {
         if(str_ids.empty()) {
             return {};
         }

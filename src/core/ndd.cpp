@@ -214,6 +214,7 @@ exit_newcreateIndex:
 
 /**
  * new impl. of getIndexEntry. Copies the logic as is
+ * XXX: Logic is incomplete. Check the function impl.
  */
 std::shared_ptr<NewCacheEntry> IndexManager::newgetIndexEntry(std::string &index_id){
 
@@ -222,7 +223,6 @@ std::shared_ptr<NewCacheEntry> IndexManager::newgetIndexEntry(std::string &index
         //std::shared_lock<std::shared_mutex> read_lock(indices_mutex_);
         auto it = newindices_.find(index_id);
         if(it != newindices_.end()) {
-            std::cout << __func__ << " it not end() for index_id: " << index_id << std::endl;
             return it->second;
         }
     }
@@ -257,7 +257,9 @@ std::pair<bool, std::string> IndexManager::addNamedVectors(std::string& index_id
                                     std::vector<ndd::GenericVectorObject>& vectors)
 {
     std::pair<bool, std::string> ret;
-    std::shared_ptr<NewCacheEntry> entry = nullptr;
+    std::shared_ptr<NewCacheEntry> index_cache_entry = nullptr;
+    std::vector<std::pair<ndd::idInt, ndd::VectorMeta>> meta_batch;
+    std::vector<std::pair<ndd::idInt, std::string>> filter_batch;
     ret.first = true;
     ret.second = "";
 
@@ -300,8 +302,8 @@ std::pair<bool, std::string> IndexManager::addNamedVectors(std::string& index_id
 #endif //if 0
 
     /* Get index from index_id*/
-    entry = newgetIndexEntry(index_id);
-    if(!entry){
+    index_cache_entry = newgetIndexEntry(index_id);
+    if(!index_cache_entry){
         ret.first = false;
         ret.second = "Could not find index: " + index_id;
 
@@ -311,10 +313,7 @@ std::pair<bool, std::string> IndexManager::addNamedVectors(std::string& index_id
         goto exit_addNamedVectors;
     }
 
-    std::cout << "entry.index_id - " << entry->index_id << std::endl;
-    /* Create intID for each StringID using IDMapper*/
-
-
+    std::cout << "index_cache_entry.index_id - " << index_cache_entry->index_id << std::endl;
 
     /**
      * TODO: Critical
@@ -323,6 +322,97 @@ std::pair<bool, std::string> IndexManager::addNamedVectors(std::string& index_id
      */
 
 
+    /* Create intID for each StringID using IDMapper*/
+    /**
+     * DELETES NOT SUPPORTED
+     * XXX: Here we check if there have been deletes before calling
+     * create_ids_batch appropriately. Right now it is not clear how
+     * deletes will be done - hence we arent checking deletes, just creating ids.
+     */
+    if(!index_cache_entry->id_mapper->newcreate_ids_batch<false>(vectors, nullptr)){
+        ret.first = false;
+        ret.second = "Could not create IDs for: " + index_id;
+        goto exit_addNamedVectors;
+    }
+
+    /*DEBUGGING ONLY */
+#if 0
+    for (size_t i = 0; i < vectors.size(); ++i) {
+        const auto& obj = vectors[i];
+
+        std::cout << "vector[" << i << "] "
+                    << "id: " << obj.id
+                    << " numeric_id: ("
+                    << obj.numeric_id.first << ", "
+                    << std::boolalpha << obj.numeric_id.second << ")\n";
+    }
+#endif //if 0
+
+    for (size_t i = 0; i < vectors.size(); ++i) {
+        const auto& obj = vectors[i];
+        ndd::VectorMeta meta;
+
+        meta.id = obj.id; //string id
+        meta.filter = obj.filter;
+        meta.meta = obj.meta;
+
+        meta_batch.emplace_back(obj.numeric_id.first, std::move(meta));
+
+        /*populate the filter*/
+        if(!obj.filter.empty()){
+            filter_batch.emplace_back(obj.numeric_id.first, obj.filter);
+        }
+
+        // Print vector object
+        std::cout << "=== vector[" << i << "] ===" << std::endl;
+        std::cout << "  id: " << obj.id
+                << "  numeric_id: (" << obj.numeric_id.first
+                << ", " << std::boolalpha << obj.numeric_id.second << ")"
+                << std::endl;
+        std::cout << "  filter: " << obj.filter << std::endl;
+
+        // Print corresponding meta_batch entry
+        auto& mb = meta_batch.back();
+        std::cout << "  meta_batch -> numeric_id: " << mb.first
+                << ", meta.id: " << mb.second.id
+                << ", meta.filter: " << mb.second.filter
+                << std::endl;
+
+        // Print filter_batch entry (if added this iteration)
+        if (!obj.filter.empty()) {
+            auto& fb = filter_batch.back();
+            std::cout << "  filter_batch -> numeric_id: " << fb.first
+                    << ", filter: " << fb.second
+                    << std::endl;
+        }
+    }
+
+    // /**
+    //  * Add filter and metadata [it is a per index property]
+    //  */
+    index_cache_entry->meta_store_->store_meta_batch(meta_batch);
+
+    if(!filter_batch.empty()) {
+            index_cache_entry->filter_store_->add_filters_from_json_batch(filter_batch);
+    }
+
+    /*RESTART FROM HERE*/
+
+    /**
+     * create a per-subindex list and then do for every.
+     */
+
+    /**
+     * Now iterate over each named sub index and save them individually
+     */
+
+    /**
+     * for each subindex:
+     * 1. quantize the vector based on its individual quantization level
+     * 2. TODO ...
+     */
+
+    /*TODO: Sparse Vectors support*/
 
 exit_addNamedVectors:
     return ret;
