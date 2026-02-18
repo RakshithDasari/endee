@@ -71,6 +71,10 @@ namespace settings {
     // Maximum number of elements in the index
     constexpr size_t MAX_VECTORS_ADMIN = 1'000'000'000;
 
+
+    //minimum bytes in filesystem before triggering out of storage sequence
+    constexpr size_t MINIMUM_REQUIRED_FS_BYTES = (1 * GB);
+
     // Buffer for early exit in search base layer
     constexpr int EARLY_EXIT_BUFFER_INSERT = 16;
     constexpr int EARLY_EXIT_BUFFER_QUERY = 8;

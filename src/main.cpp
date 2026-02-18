@@ -36,6 +36,7 @@
 #include "quant/common.hpp"
 #include "cpu_compat_check/check_avx_compat.hpp"
 #include "cpu_compat_check/check_arm_compat.hpp"
+#include "system_sanity/system_sanity.hpp"
 
 using ndd::quant::quantLevelToString;
 using ndd::quant::stringToQuantLevel;
@@ -185,6 +186,7 @@ int main(int argc, char** argv) {
         printf("CPU is not compatible. Can't run Endee\n");
         return 0;
     }
+
     LOG_DEBUG("SERVER_ID: " << settings::SERVER_ID);
     LOG_DEBUG("SERVER_PORT: " << settings::SERVER_PORT);
     LOG_DEBUG("DATA_DIR: " << settings::DATA_DIR);
@@ -761,6 +763,10 @@ int main(int argc, char** argv) {
 
                 // Verify content type is application/msgpack or application/json
                 auto content_type = req.get_header_value("Content-Type");
+
+                if(is_disk_full()){
+                    return json_error(400, "Batch insertion aborted: Not enough storage space");
+                }
 
                 if(content_type == "application/json") {
                     auto body = crow::json::load(req.body);
