@@ -351,7 +351,7 @@ private:
         if(remainingCapacity < settings::MAX_ELEMENTS_INCREMENT_TRIGGER) {
             size_t newMaxElements = maxElements + settings::MAX_ELEMENTS_INCREMENT;
             LOG_DEBUG("Auto-resizing index " << entry.index_id << " from " << maxElements << " to "
-                                             << newMaxElements << " elements");
+                                            << newMaxElements << " elements");
 
             try {
                 entry.alg->resizeIndex(newMaxElements);
@@ -364,7 +364,6 @@ private:
         std::string index_dir = data_dir_ + "/" + entry.index_id;
         std::string vector_storage_dir = index_dir + "/vectors";
         std::string index_path = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
-        // std::string index_path = data_dir_ + "/" + entry.index_id + "/main.idx";
         std::string temp_path = index_path + ".tmp";
 
         entry.alg->saveIndex(temp_path);
@@ -515,7 +514,8 @@ public:
     bool resetIndex(const std::string& index_id, const IndexConfig& config) {
         std::cout << __func__ << std::endl;
         std::string base_path = data_dir_ + "/" + index_id;
-        std::string index_file = base_path + "/main.idx";
+        std::string vector_storage_dir = base_path + "/vectors";
+        std::string index_file = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
         LOG_DEBUG(index_file);
         std::string recover_file = base_path + "/recover.txt";
         LOG_DEBUG(recover_file);
@@ -829,7 +829,8 @@ public:
         }
 
         // Check file system without lock
-        std::string index_path = index_dir + "/main.idx";
+        std::string vector_storage_dir = index_dir + "/vectors";
+        std::string index_path = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
         if(std::filesystem::exists(index_path)) {
             throw std::runtime_error("Index already exists");
         }
@@ -842,7 +843,6 @@ public:
 
         hnswlib::SpaceType space_type = hnswlib::getSpaceType(config.space_type_str);
         std::string lmdb_dir = index_dir + "/ids";
-        // std::string vector_storage_dir = index_dir + "/vectors";
 
         //create the directory and initialize sequence for IDMapper
         LOG_INFO("Creating IDMapper for index "
@@ -851,7 +851,6 @@ public:
         // IDMapper now uses tier-based fixed bloom filter sizing based on user_type
         auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, true, user_type);
 
-        // std::filesystem::create_directories(vector_storage_dir);
 
         // Create HNSW directly with all necessary parameters
         ndd::quant::QuantizationLevel quant_level = config.quant_level;
@@ -966,12 +965,12 @@ public:
         // Step 2: Create IDMapper and VectorStorage - IDMapper handles bloom filter initialization
         auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, false);
         auto vector_storage = std::make_shared<VectorStorage>(
-                vector_storage_dir, alg->getDimension(), alg->getQuantLevel());
+                index_dir, alg->getDimension(), alg->getQuantLevel());
 
         // Initialize Sparse Storage if sparse_dim > 0
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
         if(sparse_dim > 0) {
-            std::string sparse_storage_dir = data_dir_ + "/" + index_id + "/sparse";
+            std::string sparse_storage_dir = index_dir + "/vectors/svectors_" + settings::DEFAULT_SUBINDEX;
             sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage for index: "
@@ -1069,7 +1068,9 @@ public:
 
         CacheEntry& entry = it->second;
 
-        std::string index_path = data_dir_ + "/" + index_id + "/main.idx";
+        std::string index_dir = data_dir_ + "/" + entry.index_id;
+        std::string vector_storage_dir = index_dir + "/vectors";
+        std::string index_path = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
 
         // Create a new HNSW algorithm object from the saved file
         auto new_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(index_path, 0);
