@@ -361,7 +361,10 @@ private:
             }
         }
 
-        std::string index_path = data_dir_ + "/" + entry.index_id + "/main.idx";
+        std::string index_dir = data_dir_ + "/" + entry.index_id;
+        std::string vector_storage_dir = index_dir + "/vectors";
+        std::string index_path = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
+        // std::string index_path = data_dir_ + "/" + entry.index_id + "/main.idx";
         std::string temp_path = index_path + ".tmp";
 
         entry.alg->saveIndex(temp_path);
@@ -510,6 +513,7 @@ public:
     // Reset the index file. It does not affect the LMDB or metadata.
     // This is used when the index is corrupted or needs to be reset.
     bool resetIndex(const std::string& index_id, const IndexConfig& config) {
+        std::cout << __func__ << std::endl;
         std::string base_path = data_dir_ + "/" + index_id;
         std::string index_file = base_path + "/main.idx";
         LOG_DEBUG(index_file);
@@ -797,11 +801,12 @@ public:
                      const IndexConfig& config,
                      UserType user_type = UserType::Admin,
                      size_t size_in_millions = 0) {
-        // Get usernmae and index name from index_id
+        // Get username and index name from index_id
         auto pos = index_id.find('/');
         if(pos == std::string::npos) {
             throw std::runtime_error("Invalid index ID");
         }
+        std::string index_dir = data_dir_ + "/" + index_id;
         std::string username = index_id.substr(0, pos);
         std::string index_name = index_id.substr(pos + 1);
         // Check if index already exists in metadata
@@ -824,7 +829,7 @@ public:
         }
 
         // Check file system without lock
-        std::string index_path = data_dir_ + "/" + index_id + "/main.idx";
+        std::string index_path = index_dir + "/main.idx";
         if(std::filesystem::exists(index_path)) {
             throw std::runtime_error("Index already exists");
         }
@@ -836,8 +841,8 @@ public:
         }
 
         hnswlib::SpaceType space_type = hnswlib::getSpaceType(config.space_type_str);
-        std::string lmdb_dir = data_dir_ + "/" + index_id + "/ids";
-        std::string vector_storage_dir = data_dir_ + "/" + index_id + "/vectors";
+        std::string lmdb_dir = index_dir + "/ids";
+        // std::string vector_storage_dir = index_dir + "/vectors";
 
         //create the directory and initialize sequence for IDMapper
         LOG_INFO("Creating IDMapper for index "
@@ -846,17 +851,17 @@ public:
         // IDMapper now uses tier-based fixed bloom filter sizing based on user_type
         auto id_mapper = std::make_shared<IDMapper>(lmdb_dir, true, user_type);
 
-        std::filesystem::create_directories(vector_storage_dir);
+        // std::filesystem::create_directories(vector_storage_dir);
 
         // Create HNSW directly with all necessary parameters
         ndd::quant::QuantizationLevel quant_level = config.quant_level;
         auto vector_storage =
-                std::make_shared<VectorStorage>(vector_storage_dir, config.dim, config.quant_level);
+                std::make_shared<VectorStorage>(index_dir, config.dim, config.quant_level);
 
         // Initialize Sparse Storage if needed
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage = nullptr;
         if(config.sparse_dim > 0) {
-            std::string sparse_storage_dir = data_dir_ + "/" + index_id + "/sparse";
+            std::string sparse_storage_dir = index_dir + "/vectors/svectors_" + settings::DEFAULT_SUBINDEX;
             sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage");
@@ -931,9 +936,11 @@ public:
     }
 
     void loadIndex(const std::string& index_id) {
-        std::string index_path = data_dir_ + "/" + index_id + "/main.idx";
-        std::string lmdb_dir = data_dir_ + "/" + index_id + "/ids";
-        std::string vector_storage_dir = data_dir_ + "/" + index_id + "/vectors";
+        std::cout << __func__ << std::endl;
+        std::string index_dir = data_dir_ + "/" + index_id;
+        std::string lmdb_dir = index_dir + "/ids";
+        std::string vector_storage_dir = index_dir + "/vectors";
+        std::string index_path = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
         if(!std::filesystem::exists(index_path) || !std::filesystem::exists(lmdb_dir)
            || !std::filesystem::exists(vector_storage_dir)) {
             throw std::runtime_error("Required files missing for index: " + index_id);
@@ -1053,6 +1060,8 @@ public:
 
     // Add this new function to reload just the algorithm part while preserving the CacheEntry
     void reloadIndex(const std::string& index_id) {
+        std::cout << __func__ << std::endl;
+
         auto it = indices_.find(index_id);
         if(it == indices_.end()) {
             return;  // Index not in cache

@@ -497,7 +497,7 @@ public:
                   size_t vector_dim,
                   ndd::quant::QuantizationLevel quant_level) {
         vector_store_ =
-                std::make_unique<VectorStore>(base_path + "/vectors", vector_dim, quant_level);
+                std::make_unique<VectorStore>(base_path + "/vectors/dvectors_" + settings::DEFAULT_SUBINDEX, vector_dim, quant_level);
         meta_store_ = std::make_unique<MetaStore>(base_path + "/meta");
         filter_store_ = std::make_unique<Filter>(base_path + "/filters");
     }
