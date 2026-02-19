@@ -492,7 +492,7 @@ private:
             auto space_info = std::filesystem::space(backup_dir_root);
             if(space_info.available < index_size * 2) {
                 throw std::runtime_error("Insufficient disk space: need " +
-                    std::to_string(index_size * 2 / (1024 * 1024)) + " MB");
+                    std::to_string(index_size * 2 / MB) + " MB");
             }
 
             // 5. Calculate metadata (before tar creation)
@@ -501,7 +501,7 @@ private:
             if(meta) {
                 metadata_json["original_index"] = index_name;
                 metadata_json["timestamp"] = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-                metadata_json["size_mb"] = index_size / (1024 * 1024);
+                metadata_json["size_mb"] = index_size / MB;
                 metadata_json["params"] = {{"M", meta->M},
                                {"ef_construction", meta->ef_con},
                                {"dim", meta->dimension},
