@@ -16,24 +16,28 @@ Backups are stored as `.tar` archives in `{DATA_DIR}/backups/`. Job state is per
 
 ---
 
-## Two Mutexes
+## Concurrency Model
 
 ```
-jobs_mutex_ (shared_mutex, global)       operation_mutex (mutex, per-index)
-├── Protects: backup_jobs_,              ├── Protects: index data
-│   active_backup_jobs_ maps             ├── Scope: single index
-├── Scope: all indexes                   └── Held for: seconds/minutes
-├── Held for: microseconds                   (save + tar creation)
-└── Shared reads, exclusive writes
+backup_in_progress (atomic<bool>, per-index)   flock on jobs.json (file lock)
+├── Lock-free check for write operations        ├── Protects: jobs.json file
+├── Scope: single CacheEntry                    ├── Scope: all job updates
+├── Cost: ~1 ns (single CPU instruction)        └── LOCK_EX for writes, LOCK_SH for reads
+└── Set via compare_exchange_strong                  (thread-safe file access)
+
+operation_mutex (mutex, per-index)
+├── Protects: index data during save + tar
+├── Scope: single index
+└── Held for: seconds/minutes
 ```
 
-**Why not just operation_mutex?** Backup thread holds `operation_mutex` for minutes (save + tar). If writes checked that same mutex, the HTTP request would hang. With separate `jobs_mutex_`, writes check the fast map, see backup is active, and immediately return 409.
+**Hybrid approach:** Atomic flag for write rejection (fast) + flock for job persistence (no in-memory map). Backup thread holds `operation_mutex` for minutes (save + tar). The atomic flag gives instant lock-free 409 rejection while job updates go directly to disk with flock.
 
-**No circular dependency** — neither thread holds both mutexes at the same time:
+**Write path is lock-free for backup checks:**
 
 ```
-Write:   lock jobs_mutex_ → release → lock operation_mutex → release
-Backup:  lock jobs_mutex_ → release → lock operation_mutex → release → lock jobs_mutex_ → release
+Write:   atomic load backup_in_progress → lock operation_mutex → release
+Backup:  compare_exchange_strong(flag) → flock jobs.json + write → lock operation_mutex → release → clear flag → flock jobs.json + write
 ```
 
 ---
@@ -44,30 +48,34 @@ Backup:  lock jobs_mutex_ → release → lock operation_mutex → release → l
 
 ```
 POST /index/X/backup → validateBackupName() → check no duplicate on disk
-→ generate job_id → [LOCK jobs_mutex_] register job + persist [UNLOCK]
+→ generate job_id → compare_exchange_strong(backup_in_progress, false→true)
+→ [flock LOCK_EX] register job to jobs.json [unlock]
 → spawn detached thread → return 202 { job_id }
 ```
+
+`compare_exchange_strong` atomically rejects if another backup is already running for this index.
 
 **Background thread** (`executeBackupJob`):
 
 ```
-[LOCK jobs_mutex_] verify job exists [UNLOCK]
+[flock LOCK_SH] verify job exists in jobs.json [unlock]
 → check disk space (need 2x index size) → read metadata
 → [LOCK operation_mutex] saveIndexInternal → write metadata.json → create .tmp_{name}.tar → cleanup metadata.json [UNLOCK operation_mutex]
-→ [LOCK jobs_mutex_] erase from active_backup_jobs_ [UNLOCK]
+→ clear backup_in_progress flag (atomic store false)
 → rename .tmp_ → final tar (atomic)
-→ [LOCK jobs_mutex_] mark COMPLETED + persist [UNLOCK]
+→ [flock LOCK_EX] mark COMPLETED in jobs.json [unlock]
 ```
 
-**On failure**: cleanup temp files → mark job FAILED → erase from active_backup_jobs_ → persist.
+**On failure**: cleanup temp files → clear backup_in_progress flag → [flock LOCK_EX] mark job FAILED in jobs.json [unlock].
 
 ### Write During Backup
 
 ```
-addVectors/deleteVectors/updateFilters/deleteByFilter/replaceVector
-→ checkBackupInProgress(): [SHARED LOCK jobs_mutex_] check active_backup_jobs_ [UNLOCK]
+addVectors/deleteVectors/updateFilters/deleteByFilter/deleteIndex
+→ checkBackupInProgress(): atomic load backup_in_progress (NO lock needed)
 → if backup active: immediately throw 409 "Cannot modify index while backup is in progress"
 → if no backup: [LOCK operation_mutex] do the write [UNLOCK] → 200 OK
+  (blocks normally if another write holds operation_mutex — same as before)
 ```
 
 ### Restore Backup
@@ -104,12 +112,12 @@ NOTE: Upload currently buffers entire file in RAM (Crow multipart parser limitat
 
 | # | Check | Where |
 |---|-------|-------|
-| 1 | **One backup per index** — active_backup_jobs_ allows only one running backup per index | createBackupAsync, checkBackupInProgress |
-| 2 | **Write protection** — all write ops check backup status first, get instant 409 if active | addVectors, deleteVectors, updateFilters, deleteByFilter, replaceVector |
+| 1 | **One backup per index** — `compare_exchange_strong` on atomic flag prevents duplicate backups per index | createBackupAsync |
+| 2 | **Write protection** — all write ops do lock-free atomic check, get instant 409 if backup active | addVectors, deleteVectors, updateFilters, deleteByFilter, deleteIndex |
 | 3 | **Name validation** — alphanumeric, underscores, hyphens only; max 200 chars | validateBackupName |
 | 4 | **Duplicate prevention** — checked at creation AND inside background thread | createBackupAsync, executeBackupJob, upload |
 | 5 | **Disk space** — requires 2x index size available | executeBackupJob |
 | 6 | **Atomic tar** — writes to .tmp_ first, then renames | executeBackupJob |
-| 7 | **Crash recovery** — on startup: mark stale IN_PROGRESS as FAILED, delete .tmp_ files | loadJobs, cleanupIncompleteBackups |
+| 7 | **Crash recovery** — on startup: mark stale IN_PROGRESS as FAILED, delete .tmp_ files. Atomic flag resets to `false` on fresh `CacheEntry` creation | loadJobs, cleanupIncompleteBackups |
 | 8 | **Restore safety** — target must not exist, metadata must be valid, cleanup on failure | restoreBackup |
-| 9 | **Job persistence** — atomic write (tmp + rename) to jobs.json on every status change | persistJobs |
+| 9 | **Job persistence** — flock (LOCK_EX) on jobs.json for thread-safe read-modify-write on every status change | modifyJobsFile |

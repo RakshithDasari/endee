@@ -26,6 +26,9 @@
 #include <atomic>
 #include <optional>
 #include <random>
+#include <sys/file.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <type_traits>
 #include <future>
 
@@ -71,6 +74,9 @@ struct CacheEntry {
     size_t searchCount{0};
     // Per-index operation mutex for coordinating addVectors, saveIndex, deleteVectors
     std::mutex operation_mutex;
+    std::atomic<bool> backup_in_progress{false};
+    // read only when backup_in_progress is observed as true.
+    std::string active_backup_job_id;
 
     // Default constructor required for map
     CacheEntry() :
@@ -211,10 +217,6 @@ private:
     // Write-ahead log for each index
     std::unordered_map<std::string, std::unique_ptr<WriteAheadLog>> wal_logs_;
 
-    // Backup job tracking
-    std::unordered_map<std::string, BackupJob> backup_jobs_;  // job_id -> BackupJob
-    mutable std::shared_mutex jobs_mutex_;                     // Protects backup_jobs_ map (mutable for const methods)
-    std::unordered_map<std::string, std::string> active_backup_jobs_;  // index_id -> job_id (tracks active backups per index)
 
     // New methods to handle WAL
     WriteAheadLog* getOrCreateWAL(const std::string& index_id) {
@@ -442,12 +444,18 @@ private:
     // Async backup: Background thread execution
     void executeBackupJob(const std::string& job_id, const std::string& index_id, const std::string& backup_name) {
         try {
-            // Update job status in map
+            // Verify job exists in jobs.json
             {
-                std::unique_lock<std::shared_mutex> lock(jobs_mutex_);
-                auto it = backup_jobs_.find(job_id);
-                if (it == backup_jobs_.end()) {
+                auto jobs = readJobsFile();
+                bool found = false;
+                for (const auto& j : jobs) {
+                    if (j.job_id == job_id) { found = true; break; }
+                }
+                if (!found) {
                     LOG_ERROR("Job not found: " << job_id);
+                    auto& entry = getIndexEntry(index_id);
+                    entry.active_backup_job_id.clear();
+                    entry.backup_in_progress.store(false, std::memory_order_release);
                     return;
                 }
             }
@@ -559,12 +567,9 @@ private:
             }
             // Lock released here - writes can now proceed!
 
-            // 11. Remove from active backups - WRITES NOW ALLOWED!
-            {
-                std::unique_lock<std::shared_mutex> lock(jobs_mutex_);
-                active_backup_jobs_.erase(index_id);
-                // Note: Job status is still IN_PROGRESS, but writes are allowed
-            }
+            // 11. Clear backup-in-progress flag - WRITES NOW ALLOWED!
+            entry.active_backup_job_id.clear();
+            entry.backup_in_progress.store(false, std::memory_order_release);
 
             LOG_INFO("Backup tar created, write operations now allowed for index: " << index_id);
 
@@ -572,15 +577,13 @@ private:
             std::filesystem::rename(backup_tar_temp, backup_tar_final);
 
             // 13. Update job status to COMPLETED
-            {
-                std::unique_lock<std::shared_mutex> lock(jobs_mutex_);
-                auto it = backup_jobs_.find(job_id);
-                if (it != backup_jobs_.end()) {
+            modifyJobsFile([&](std::unordered_map<std::string, BackupJob>& jobs) {
+                auto it = jobs.find(job_id);
+                if (it != jobs.end()) {
                     it->second.status = BackupJobStatus::COMPLETED;
                     it->second.completed_at = std::chrono::system_clock::now();
-                    persistJobs();
                 }
-            }
+            });
 
             LOG_INFO("Backup job completed: " << job_id << " -> " << backup_tar_final);
 
@@ -604,113 +607,168 @@ private:
                 std::filesystem::remove(metadata_file_in_index);
             }
 
+            // Clear backup-in-progress flag so writes can proceed
+            try {
+                auto& entry = getIndexEntry(index_id);
+                entry.active_backup_job_id.clear();
+                entry.backup_in_progress.store(false, std::memory_order_release);
+            } catch (...) {
+                // Index may have been evicted; flag is gone with the CacheEntry
+            }
+
             // Update job status to FAILED
             {
-                std::unique_lock<std::shared_mutex> lock(jobs_mutex_);
-                auto it = backup_jobs_.find(job_id);
-                if (it != backup_jobs_.end()) {
-                    it->second.status = BackupJobStatus::FAILED;
-                    it->second.error_message = e.what();
-                    it->second.completed_at = std::chrono::system_clock::now();
-                    // Remove from active backups (in case it's still there)
-                    active_backup_jobs_.erase(index_id);
-                    persistJobs();
-                }
+                std::string err_msg = e.what();
+                modifyJobsFile([&](std::unordered_map<std::string, BackupJob>& jobs) {
+                    auto it = jobs.find(job_id);
+                    if (it != jobs.end()) {
+                        it->second.status = BackupJobStatus::FAILED;
+                        it->second.error_message = err_msg;
+                        it->second.completed_at = std::chrono::system_clock::now();
+                    }
+                });
             }
 
             LOG_ERROR("Backup job failed: " << job_id << " - " << e.what());
         }
     }
 
-    // Job persistence methods
-    void persistJobs() {
-        // Called with jobs_mutex_ held by caller
-        std::string jobs_file = data_dir_ + "/backups/jobs.json";
-        std::string temp_file = jobs_file + ".tmp";
+    // Job persistence via flock on jobs.json (no in-memory map)
 
-        nlohmann::json j_array = nlohmann::json::array();
-        for (const auto& [job_id, job] : backup_jobs_) {
-            j_array.push_back(job.toJson());
-        }
-
-        // Atomic write: write to temp file, then rename
-        std::ofstream ofs(temp_file);
-        ofs << j_array.dump(2);
-        ofs.close();
-
-        std::filesystem::rename(temp_file, jobs_file);
+    std::string getJobsFilePath() const {
+        return data_dir_ + "/backups/jobs.json";
     }
 
-    // Check if backup is in progress for this index
+    // Read all jobs from file with shared flock
+    std::vector<BackupJob> readJobsFile() const {
+        std::string jobs_file = getJobsFilePath();
+        std::vector<BackupJob> result;
+
+        int fd = ::open(jobs_file.c_str(), O_RDONLY);
+        if (fd < 0) return result;
+
+        flock(fd, LOCK_SH);
+
+        std::string content;
+        char buf[4096];
+        ssize_t n;
+        while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
+            content.append(buf, n);
+        }
+
+        flock(fd, LOCK_UN);
+        ::close(fd);
+
+        if (!content.empty()) {
+            try {
+                auto j_array = nlohmann::json::parse(content);
+                for (const auto& j : j_array) {
+                    result.push_back(BackupJob::fromJson(j));
+                }
+            } catch (...) {}
+        }
+
+        return result;
+    }
+
+    // Read-modify-write jobs.json with exclusive flock
+    template<typename Modifier>
+    void modifyJobsFile(Modifier modifier) {
+        std::string jobs_file = getJobsFilePath();
+        std::filesystem::create_directories(std::filesystem::path(jobs_file).parent_path());
+
+        int fd = ::open(jobs_file.c_str(), O_RDWR | O_CREAT, 0644);
+        if (fd < 0) {
+            LOG_ERROR("Failed to open jobs file: " << jobs_file);
+            return;
+        }
+
+        flock(fd, LOCK_EX);
+
+        // Read existing content
+        std::unordered_map<std::string, BackupJob> jobs;
+        std::string content;
+        char buf[4096];
+        ssize_t n;
+        while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
+            content.append(buf, n);
+        }
+        if (!content.empty()) {
+            try {
+                auto j_array = nlohmann::json::parse(content);
+                for (const auto& j : j_array) {
+                    BackupJob job = BackupJob::fromJson(j);
+                    jobs[job.job_id] = job;
+                }
+            } catch (...) {}
+        }
+
+        // Apply caller's modification
+        modifier(jobs);
+
+        // Write back
+        nlohmann::json j_array = nlohmann::json::array();
+        for (const auto& [id, job] : jobs) {
+            j_array.push_back(job.toJson());
+        }
+        std::string new_content = j_array.dump(2);
+
+        ftruncate(fd, 0);
+        lseek(fd, 0, SEEK_SET);
+        ::write(fd, new_content.c_str(), new_content.size());
+
+        flock(fd, LOCK_UN);
+        ::close(fd);
+    }
+
+    // Check if backup is in progress for this index (lock-free atomic check)
     // Throws std::runtime_error if backup is active
-    // Must be called BEFORE acquiring operation_mutex
-    void checkBackupInProgress(const std::string& index_id) const {
-        std::shared_lock<std::shared_mutex> lock(jobs_mutex_);
-        auto it = active_backup_jobs_.find(index_id);
-        if (it != active_backup_jobs_.end()) {
-            const std::string& job_id = it->second;
+    // Only rejects for backup-in-progress; normal write contention is handled by operation_mutex
+    void checkBackupInProgress(const CacheEntry& entry) const {
+        if (entry.backup_in_progress.load(std::memory_order_acquire)) {
             throw std::runtime_error(
                 "Cannot modify index while backup is in progress. "
-                "Backup job ID: " + job_id + ". "
+                "Backup job ID: " + entry.active_backup_job_id + ". "
                 "Please wait for backup to complete or check status at /api/v1/backups/jobs"
             );
         }
     }
 
-    void loadJobs() {
-        std::string jobs_file = data_dir_ + "/backups/jobs.json";
-
-        if (!std::filesystem::exists(jobs_file)) {
-            return;
-        }
-
-        try {
-            std::ifstream ifs(jobs_file);
-            nlohmann::json j_array;
-            ifs >> j_array;
-
-            std::unique_lock<std::shared_mutex> lock(jobs_mutex_);
-            for (const auto& j : j_array) {
-                BackupJob job = BackupJob::fromJson(j);
-
-                // Mark stale IN_PROGRESS jobs as FAILED
-                if (job.status == BackupJobStatus::IN_PROGRESS) {
-                    job.status = BackupJobStatus::FAILED;
-                    job.error_message = "Server restarted during backup";
-                    job.completed_at = std::chrono::system_clock::now();
-                }
-
-                backup_jobs_[job.job_id] = job;
-            }
-
-            // Persist the updated jobs (marks IN_PROGRESS as FAILED)
-            persistJobs();
-
-        } catch (const std::exception& e) {
-            LOG_ERROR("Failed to load jobs.json: " << e.what());
-        }
-    }
-
-    void cleanupIncompleteBackups() {
+    void recoverBackupState() {
         std::string backup_dir = data_dir_ + "/backups";
 
-        if (!std::filesystem::exists(backup_dir)) {
-            return;
+        // Mark stale IN_PROGRESS jobs as FAILED
+        if (std::filesystem::exists(getJobsFilePath())) {
+            try {
+                modifyJobsFile([](std::unordered_map<std::string, BackupJob>& jobs) {
+                    for (auto& [id, job] : jobs) {
+                        if (job.status == BackupJobStatus::IN_PROGRESS) {
+                            job.status = BackupJobStatus::FAILED;
+                            job.error_message = "Server restarted during backup";
+                            job.completed_at = std::chrono::system_clock::now();
+                        }
+                    }
+                });
+            } catch (const std::exception& e) {
+                LOG_ERROR("Failed to load jobs.json: " << e.what());
+            }
         }
 
-        try {
-            for (const auto& entry : std::filesystem::directory_iterator(backup_dir)) {
-                // Remove temp tar files (.tmp_*.tar) that were left from failed backups
-                if (entry.is_regular_file()) {
-                    std::string filename = entry.path().filename().string();
-                    if (filename.starts_with(".tmp_") && filename.ends_with(".tar")) {
-                        LOG_INFO("Removing incomplete backup file: " << entry.path().string());
-                        std::filesystem::remove(entry.path());
+        // Remove temp tar files (.tmp_*.tar) left from failed backups
+        if (std::filesystem::exists(backup_dir)) {
+            try {
+                for (const auto& entry : std::filesystem::directory_iterator(backup_dir)) {
+                    if (entry.is_regular_file()) {
+                        std::string filename = entry.path().filename().string();
+                        if (filename.starts_with(".tmp_") && filename.ends_with(".tar")) {
+                            LOG_INFO("Removing incomplete backup file: " << entry.path().string());
+                            std::filesystem::remove(entry.path());
+                        }
                     }
                 }
+            } catch (const std::exception& e) {
+                LOG_ERROR("Failed to cleanup incomplete backups: " << e.what());
             }
-        } catch (const std::exception& e) {
-            LOG_ERROR("Failed to cleanup incomplete backups: " << e.what());
         }
     }
 
@@ -811,9 +869,8 @@ public:
         metadata_manager_ = std::make_unique<MetadataManager>(data_dir);
         // Start the autosave thread
         autosave_thread_ = std::thread(&IndexManager::autosaveLoop, this);
-        // Initialize backup job tracking
-        loadJobs();
-        cleanupIncompleteBackups();
+        // Recover from any incomplete backups (mark stale jobs FAILED + remove temp files)
+        recoverBackupState();
     }
 
     ~IndexManager() {
@@ -1076,7 +1133,19 @@ public:
         std::string job_id = std::to_string(timestamp) + "_" +
             random_generator::rand_alphanum(6);
 
-        // 4. Create BackupJob record with IN_PROGRESS status
+        // 4. Get entry and atomically set backup-in-progress flag
+        auto& entry = getIndexEntry(index_id);
+
+        // Reject if backup already running for this index (atomic CAS)
+        bool expected = false;
+        if (!entry.backup_in_progress.compare_exchange_strong(expected, true,
+                std::memory_order_acq_rel)) {
+            return {false, "Backup already in progress for this index"};
+        }
+        // Flag is now true - we own it, must clear on any failure path
+        entry.active_backup_job_id = job_id;
+
+        // 5. Create BackupJob record with IN_PROGRESS status
         BackupJob job;
         job.job_id = job_id;
         job.index_id = index_id;
@@ -1085,15 +1154,11 @@ public:
         job.started_at = now;
         job.completed_at = std::chrono::system_clock::time_point();
 
-        {
-            std::unique_lock<std::shared_mutex> lock(jobs_mutex_);
-            backup_jobs_[job_id] = job;
-            // Track active backup for this index
-            active_backup_jobs_[index_id] = job_id;
-            persistJobs();
-        }
+        modifyJobsFile([&](std::unordered_map<std::string, BackupJob>& jobs) {
+            jobs[job_id] = job;
+        });
 
-        // 5. Spawn detached thread calling executeBackupJob
+        // 6. Spawn detached thread calling executeBackupJob
         std::thread([this, job_id, index_id, backup_name]() {
             executeBackupJob(job_id, index_id, backup_name);
         }).detach();
@@ -1105,13 +1170,7 @@ public:
     }
 
     std::vector<BackupJob> getAllBackupJobs() {
-        std::shared_lock<std::shared_mutex> lock(jobs_mutex_);
-        std::vector<BackupJob> jobs;
-        jobs.reserve(backup_jobs_.size());
-        for (const auto& [job_id, job] : backup_jobs_) {
-            jobs.push_back(job);
-        }
-        return jobs;
+        return readJobsFile();
     }
 
     bool createIndex(const std::string& index_id,
@@ -1406,8 +1465,8 @@ public:
             // Get the index entry (loads if needed, handles all locking)
             auto& entry = getIndexEntry(index_id);
 
-            // Check if backup is in progress
-            checkBackupInProgress(index_id);
+            // Check if backup is in progress (atomic, no lock)
+            checkBackupInProgress(entry);
 
             // Use per-index operation mutex to prevent concurrent operations
             std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
@@ -1746,8 +1805,8 @@ public:
         try {
             auto& entry = getIndexEntry(index_id);
 
-            // Check if backup is in progress
-            checkBackupInProgress(index_id);
+            // Check if backup is in progress (atomic, no lock)
+            checkBackupInProgress(entry);
 
             // Use per-index operation mutex to prevent concurrent operations
             std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
@@ -1783,8 +1842,8 @@ public:
         try {
             auto& entry = getIndexEntry(index_id);
 
-            // Check if backup is in progress
-            checkBackupInProgress(index_id);
+            // Check if backup is in progress (atomic, no lock)
+            checkBackupInProgress(entry);
 
             std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
 
@@ -1821,8 +1880,8 @@ public:
         try {
             auto& entry = getIndexEntry(index_id);
 
-            // Check if backup is in progress
-            checkBackupInProgress(index_id);
+            // Check if backup is in progress (atomic, no lock)
+            checkBackupInProgress(entry);
 
             // Use per-index operation mutex to prevent concurrent operations
             std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
@@ -2168,8 +2227,14 @@ public:
     }
 
     bool deleteIndex(const std::string& index_id) {
-        // Check if backup is in progress
-        checkBackupInProgress(index_id);
+        // Check if backup is in progress (under read lock to access entry)
+        {
+            std::shared_lock<std::shared_mutex> read_lock(indices_mutex_);
+            auto it = indices_.find(index_id);
+            if (it != indices_.end()) {
+                checkBackupInProgress(it->second);
+            }
+        }
 
         std::unique_lock<std::shared_mutex> write_lock(indices_mutex_);
         // Remove from in-memory structures if loaded
