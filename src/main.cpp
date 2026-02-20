@@ -486,13 +486,18 @@ int main(int argc, char** argv) {
                 }
             });
 
-    // Download Backup
+    // Download Backup - accepts auth token via query param or works without auth if disabled
     CROW_ROUTE(app, "/api/v1/backups/<string>/download")
-            .CROW_MIDDLEWARES(app, AuthMiddleware)
-            .methods("GET"_method)([&index_manager, &app](const crow::request& req,
-                                                          const std::string& backup_name) {
-                auto& ctx = app.get_context<AuthMiddleware>(req);
+            .methods("GET"_method)([&](const crow::request& req, const std::string& backup_name) {
                 try {
+                    if(settings::AUTH_ENABLED) {
+                        std::string token =
+                                req.url_params.get("token") ? req.url_params.get("token") : "";
+                        if(token != settings::AUTH_TOKEN) {
+                            return json_error(401, "Unauthorized");
+                        }
+                    }
+
                     std::string backup_file =
                             settings::DATA_DIR + "/backups/" + backup_name + ".tar";
 
@@ -500,7 +505,7 @@ int main(int argc, char** argv) {
                         return json_error(404, "Backup not found");
                     }
 
-                    
+
                     crow::response response;
                     response.set_static_file_info_unsafe(backup_file);
                     response.set_header("Content-Type", "application/x-tar");
@@ -675,25 +680,27 @@ int main(int argc, char** argv) {
     // Delete index
     CROW_ROUTE(app, "/api/v1/index/<string>/delete")
             .CROW_MIDDLEWARES(app, AuthMiddleware)
-            .methods("DELETE"_method)(
-                    [&index_manager, &app](const crow::request& req, std::string index_name) {
-                        auto& ctx = app.get_context<AuthMiddleware>(req);
+            .methods("DELETE"_method)([&index_manager, &app](const crow::request& req,
+                                                             std::string index_name) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
 
-                        // Format full index_id
-                        std::string index_id = ctx.username + "/" + index_name;
+                // Format full index_id
+                std::string index_id = ctx.username + "/" + index_name;
 
-                        try {
-                            if(index_manager.deleteIndex(index_id)) {
-                                return crow::response(200, "Index deleted successfully");
-                            } else {
-                                return json_error(404, "Index not found");
-                            }
-                        } catch(const std::runtime_error& e) {
-                            return json_error(400, e.what());
-                        } catch(const std::exception& e) {
-                            return json_error_500(ctx.username, req.url, std::string("Failed to delete index: ") + e.what());
-                        }
-                    });
+                try {
+                    if(index_manager.deleteIndex(index_id)) {
+                        return crow::response(200, "Index deleted successfully");
+                    } else {
+                        return json_error(404, "Index not found");
+                    }
+                } catch(const std::runtime_error& e) {
+                    return json_error(400, e.what());
+                } catch(const std::exception& e) {
+                    return json_error_500(ctx.username,
+                                          req.url,
+                                          std::string("Failed to delete index: ") + e.what());
+                }
+            });
 
     // Search
     CROW_ROUTE(app, "/api/v1/index/<string>/search")
