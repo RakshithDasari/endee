@@ -252,6 +252,9 @@ std::shared_ptr<NewCacheEntry> IndexManager::newgetIndexEntry(std::string &index
 
 /**
  * Adds list of named vectors.
+ * XXX: Things that are omitted for now:
+ * 1. WAL
+ * 2. Sparse vector support
  */
 std::pair<bool, std::string> IndexManager::addNamedVectors(std::string& index_id,
                                     std::vector<ndd::GenericVectorObject>& vectors)
@@ -308,7 +311,7 @@ std::pair<bool, std::string> IndexManager::addNamedVectors(std::string& index_id
         ret.second = "Could not find index: " + index_id;
 
         /*For now*/
-        ret.second += " XXXX: MAYBE THIS IS BECAUSE the IMPLEMENTATION OF newgetIndexEntry is incomplete";
+        ret.second += " XXXX: THIS IS BECAUSE the IMPLEMENTATION OF newgetIndexEntry is incomplete";
         LOG_INFO(ret.second);
         goto exit_addNamedVectors;
     }
@@ -327,7 +330,7 @@ std::pair<bool, std::string> IndexManager::addNamedVectors(std::string& index_id
      * DELETES NOT SUPPORTED
      * XXX: Here we check if there have been deletes before calling
      * create_ids_batch appropriately. Right now it is not clear how
-     * deletes will be done - hence we arent checking deletes, just creating ids.
+     * deletes will be done - hence we aren't checking deletes, just creating ids.
      */
     if(!index_cache_entry->id_mapper->newcreate_ids_batch<false>(vectors, nullptr)){
         ret.first = false;

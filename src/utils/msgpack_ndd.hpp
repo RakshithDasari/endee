@@ -42,6 +42,18 @@ namespace ndd {
         MSGPACK_DEFINE(id, meta, filter, norm, vector)
     };
 
+    struct HybridVectorObject {
+        std::string id;                    // String identifier
+        std::vector<uint8_t> meta;         // Binary metadata (zipped)
+        std::string filter;                // Filter as JSON string
+        float norm;                        // Vector norm (only for cosine distance)
+        std::vector<float> vector;         // Vector data
+        std::vector<uint32_t> sparse_ids;  // Sparse vector indices
+        std::vector<float> sparse_values;  // Sparse vector values
+
+        MSGPACK_DEFINE(id, meta, filter, norm, vector, sparse_ids, sparse_values)
+    };
+
     struct DenseVectorObject{
         float norm;                        // Vector norm (only for cosine distance)
         std::vector<float> vector;         // Vector data
@@ -71,18 +83,6 @@ namespace ndd {
         std::pair<idInt, bool> numeric_id {static_cast<idInt>(-1), false}; //setting it to default
 
         // MSGPACK_DEFINE(id, meta, filter, norm, vector, sparse_ids, sparse_values)
-    };
-
-    struct HybridVectorObject {
-        std::string id;                    // String identifier
-        std::vector<uint8_t> meta;         // Binary metadata (zipped)
-        std::string filter;                // Filter as JSON string
-        float norm;                        // Vector norm (only for cosine distance)
-        std::vector<float> vector;         // Vector data
-        std::vector<uint32_t> sparse_ids;  // Sparse vector indices
-        std::vector<float> sparse_values;  // Sparse vector values
-
-        MSGPACK_DEFINE(id, meta, filter, norm, vector, sparse_ids, sparse_values)
     };
 
     // Search result structure
