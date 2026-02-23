@@ -13,7 +13,7 @@
 #include "quant_vector.hpp"
 #include "wal.hpp"
 #include "../quant/dispatch.hpp"
-#include "../utils/archive_utils.hpp"
+#include "../storage/backup_utils.hpp"
 #include <memory>
 #include <deque>
 #include <unordered_map>
@@ -26,9 +26,6 @@
 #include <atomic>
 #include <optional>
 #include <random>
-#include <sys/file.h>
-#include <fcntl.h>
-#include <unistd.h>
 #include <type_traits>
 #include <future>
 
@@ -74,8 +71,6 @@ struct CacheEntry {
     size_t searchCount{0};
     // Per-index operation mutex for coordinating addVectors, saveIndex, deleteVectors
     std::mutex operation_mutex;
-    std::atomic<bool> backup_in_progress{false};
-    // read only when backup_in_progress is observed as true.
     std::string active_backup_job_id;
 
     // Default constructor required for map
@@ -145,58 +140,9 @@ struct PersistenceConfig {
     bool save_on_shutdown{true};
 };
 
-enum class BackupJobStatus : uint8_t {
-    IN_PROGRESS = 1,
-    COMPLETED = 2,
-    FAILED = 3
-};
-
-struct BackupJob {
-    std::string job_id;
+struct ActiveBackup {
     std::string index_id;
-    std::string backup_name;
-    BackupJobStatus status;
-    std::string error_message;
-    std::chrono::system_clock::time_point started_at;
-    std::chrono::system_clock::time_point completed_at;
-
-    nlohmann::json toJson() const {
-        nlohmann::json j;
-        j["job_id"] = job_id;
-        j["index_id"] = index_id;
-        j["backup_name"] = backup_name;
-        j["status"] = static_cast<uint8_t>(status);
-        j["error_message"] = error_message;
-
-        auto started_time_t = std::chrono::system_clock::to_time_t(started_at);
-        j["started_at"] = std::to_string(started_time_t);
-
-        auto completed_time_t = std::chrono::system_clock::to_time_t(completed_at);
-        j["completed_at"] = std::to_string(completed_time_t);
-
-        return j;
-    }
-
-    static BackupJob fromJson(const nlohmann::json& j) {
-        BackupJob job;
-        job.job_id = j.value("job_id", "");
-        job.index_id = j.value("index_id", "");
-        job.backup_name = j.value("backup_name", "");
-        job.status = static_cast<BackupJobStatus>(j.value("status", 1));
-        job.error_message = j.value("error_message", "");
-
-        if (j.contains("started_at")) {
-            auto started_time_t = std::stoll(j["started_at"].get<std::string>());
-            job.started_at = std::chrono::system_clock::from_time_t(started_time_t);
-        }
-
-        if (j.contains("completed_at")) {
-            auto completed_time_t = std::stoll(j["completed_at"].get<std::string>());
-            job.completed_at = std::chrono::system_clock::from_time_t(completed_time_t);
-        }
-
-        return job;
-    }
+    std::string backup_name; // also serves as job_id
 };
 
 class IndexManager {
@@ -442,39 +388,29 @@ private:
     }
 
     // Async backup: Background thread execution
-    void executeBackupJob(const std::string& job_id, const std::string& index_id, const std::string& backup_name) {
-        try {
-            // Verify job exists in jobs.json
-            {
-                auto jobs = readJobsFile();
-                bool found = false;
-                for (const auto& j : jobs) {
-                    if (j.job_id == job_id) { found = true; break; }
-                }
-                if (!found) {
-                    LOG_ERROR("Job not found: " << job_id);
-                    auto& entry = getIndexEntry(index_id);
-                    entry.active_backup_job_id.clear();
-                    entry.backup_in_progress.store(false, std::memory_order_release);
-                    return;
-                }
-            }
+    void executeBackupJob(const std::string& index_id, const std::string& backup_name) {
+        // Extract username for cleanup
+        std::string username;
+        size_t upos = index_id.find('/');
+        if (upos != std::string::npos) {
+            username = index_id.substr(0, upos);
+        }
 
+        try {
             // 1. Parse user and index name
-            std::string user_id, index_name;
-            size_t pos = index_id.find('/');
-            if(pos != std::string::npos) {
-                user_id = index_id.substr(0, pos);
-                index_name = index_id.substr(pos + 1);
+            std::string index_name;
+            if (upos != std::string::npos) {
+                index_name = index_id.substr(upos + 1);
             } else {
                 throw std::runtime_error("Invalid index ID format");
             }
 
-            // 2. Prepare paths
-            std::string backup_dir_root = data_dir_ + "/backups";
+            // 2. Prepare paths (per-user backup directory)
+            std::string user_backup_dir = getUserBackupDir(username);
+            std::filesystem::create_directories(user_backup_dir);
             std::string source_dir = data_dir_ + "/" + index_id;
-            std::string backup_tar_final = backup_dir_root + "/" + backup_name + ".tar";
-            std::string backup_tar_temp = backup_dir_root + "/.tmp_" + backup_name + ".tar";
+            std::string backup_tar_final = user_backup_dir + "/" + backup_name + ".tar";
+            std::string backup_tar_temp = user_backup_dir + "/.tmp_" + backup_name + ".tar";
 
             // 3. Check if backup already exists
             if(std::filesystem::exists(backup_tar_final)) {
@@ -489,7 +425,7 @@ private:
                 }
             }
 
-            auto space_info = std::filesystem::space(backup_dir_root);
+            auto space_info = std::filesystem::space(user_backup_dir);
             if(space_info.available < index_size * 2) {
                 throw std::runtime_error("Insufficient disk space: need " +
                     std::to_string(index_size * 2 / MB) + " MB");
@@ -532,10 +468,9 @@ private:
                         throw std::runtime_error("Failed to create metadata file: " + metadata_file_in_index);
                     }
                     meta_file << metadata_json.dump(4);
-                    meta_file.flush();  // Ensure data is written to OS buffer
+                    meta_file.flush();
                     meta_file.close();
 
-                    // Verify file exists and is readable
                     if(!std::filesystem::exists(metadata_file_in_index)) {
                         throw std::runtime_error("Metadata file was not created: " + metadata_file_in_index);
                     }
@@ -543,18 +478,15 @@ private:
                 }
 
                 // 9. Create tar directly from index directory to temp location (lock held)
-                // This ensures consistent snapshot without copying
                 std::string error_msg;
                 LOG_DEBUG("Creating tar archive from " << source_dir << " to " << backup_tar_temp);
                 if(!ndd::ArchiveUtils::createTar(source_dir, backup_tar_temp, error_msg)) {
-                    // Cleanup metadata.json on failure
                     if(std::filesystem::exists(metadata_file_in_index)) {
                         std::filesystem::remove(metadata_file_in_index);
                     }
                     throw std::runtime_error("Failed to create tar archive: " + error_msg);
                 }
 
-                // Verify tar was created successfully
                 if(!std::filesystem::exists(backup_tar_temp)) {
                     throw std::runtime_error("Tar archive was not created: " + backup_tar_temp);
                 }
@@ -567,208 +499,73 @@ private:
             }
             // Lock released here - writes can now proceed!
 
-            // 11. Clear backup-in-progress flag - WRITES NOW ALLOWED!
+            // 11. Clear active backup tracking
             entry.active_backup_job_id.clear();
-            entry.backup_in_progress.store(false, std::memory_order_release);
+            active_user_backups_.erase(username);
 
             LOG_INFO("Backup tar created, write operations now allowed for index: " << index_id);
 
-            // 12. Move tar from temp to final location (no lock, writes allowed)
+            // 12. Move tar from temp to final location
             std::filesystem::rename(backup_tar_temp, backup_tar_final);
 
-            // 13. Update job status to COMPLETED
-            modifyJobsFile([&](std::unordered_map<std::string, BackupJob>& jobs) {
-                auto it = jobs.find(job_id);
-                if (it != jobs.end()) {
-                    it->second.status = BackupJobStatus::COMPLETED;
-                    it->second.completed_at = std::chrono::system_clock::now();
-                }
-            });
-
-            LOG_INFO("Backup job completed: " << job_id << " -> " << backup_tar_final);
+            LOG_INFO("Backup completed: " << backup_name << " -> " << backup_tar_final);
 
         } catch (const std::exception& e) {
             // Cleanup on failure
-            std::string backup_dir_root = data_dir_ + "/backups";
+            std::string user_backup_dir = getUserBackupDir(username);
             std::string source_dir = data_dir_ + "/" + index_id;
-            std::string backup_tar_final = backup_dir_root + "/" + backup_name + ".tar";
-            std::string backup_tar_temp = backup_dir_root + "/.tmp_" + backup_name + ".tar";
+            std::string backup_tar_final = user_backup_dir + "/" + backup_name + ".tar";
+            std::string backup_tar_temp = user_backup_dir + "/.tmp_" + backup_name + ".tar";
             std::string metadata_file_in_index = source_dir + "/metadata.json";
 
-            // Remove temp and final tar files if they exist
             if(std::filesystem::exists(backup_tar_temp)) {
                 std::filesystem::remove(backup_tar_temp);
             }
             if(std::filesystem::exists(backup_tar_final)) {
                 std::filesystem::remove(backup_tar_final);
             }
-            // Remove metadata.json from index directory if it exists (in case cleanup failed)
             if(std::filesystem::exists(metadata_file_in_index)) {
                 std::filesystem::remove(metadata_file_in_index);
             }
 
-            // Clear backup-in-progress flag so writes can proceed
+            // Clear active backup tracking
             try {
                 auto& entry = getIndexEntry(index_id);
                 entry.active_backup_job_id.clear();
-                entry.backup_in_progress.store(false, std::memory_order_release);
-            } catch (...) {
-                // Index may have been evicted; flag is gone with the CacheEntry
-            }
-
-            // Update job status to FAILED
-            {
-                std::string err_msg = e.what();
-                modifyJobsFile([&](std::unordered_map<std::string, BackupJob>& jobs) {
-                    auto it = jobs.find(job_id);
-                    if (it != jobs.end()) {
-                        it->second.status = BackupJobStatus::FAILED;
-                        it->second.error_message = err_msg;
-                        it->second.completed_at = std::chrono::system_clock::now();
-                    }
-                });
-            }
-
-            LOG_ERROR("Backup job failed: " << job_id << " - " << e.what());
-        }
-    }
-
-    // Job persistence via flock on jobs.json (no in-memory map)
-
-    std::string getJobsFilePath() const {
-        return data_dir_ + "/backups/jobs.json";
-    }
-
-    // Read all jobs from file with shared flock
-    std::vector<BackupJob> readJobsFile() const {
-        std::string jobs_file = getJobsFilePath();
-        std::vector<BackupJob> result;
-
-        int fd = ::open(jobs_file.c_str(), O_RDONLY);
-        if (fd < 0) return result;
-
-        flock(fd, LOCK_SH);
-
-        std::string content;
-        char buf[4096];
-        ssize_t n;
-        while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
-            content.append(buf, n);
-        }
-
-        flock(fd, LOCK_UN);
-        ::close(fd);
-
-        if (!content.empty()) {
-            try {
-                auto j_array = nlohmann::json::parse(content);
-                for (const auto& j : j_array) {
-                    result.push_back(BackupJob::fromJson(j));
-                }
             } catch (...) {}
-        }
+            active_user_backups_.erase(username);
 
-        return result;
+            LOG_ERROR("Backup failed: " << backup_name << " - " << e.what());
+        }
     }
 
-    // Read-modify-write jobs.json with exclusive flock
-    template<typename Modifier>
-    void modifyJobsFile(Modifier modifier) {
-        std::string jobs_file = getJobsFilePath();
-        std::filesystem::create_directories(std::filesystem::path(jobs_file).parent_path());
+    // Active backup per user: key=username
+    std::unordered_map<std::string, ActiveBackup> active_user_backups_;
 
-        int fd = ::open(jobs_file.c_str(), O_RDWR | O_CREAT, 0644);
-        if (fd < 0) {
-            LOG_ERROR("Failed to open jobs file: " << jobs_file);
-            return;
-        }
-
-        flock(fd, LOCK_EX);
-
-        // Read existing content
-        std::unordered_map<std::string, BackupJob> jobs;
-        std::string content;
-        char buf[4096];
-        ssize_t n;
-        while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
-            content.append(buf, n);
-        }
-        if (!content.empty()) {
-            try {
-                auto j_array = nlohmann::json::parse(content);
-                for (const auto& j : j_array) {
-                    BackupJob job = BackupJob::fromJson(j);
-                    jobs[job.job_id] = job;
-                }
-            } catch (...) {}
-        }
-
-        // Apply caller's modification
-        modifier(jobs);
-
-        // Write back
-        nlohmann::json j_array = nlohmann::json::array();
-        for (const auto& [id, job] : jobs) {
-            j_array.push_back(job.toJson());
-        }
-        std::string new_content = j_array.dump(2);
-
-        ftruncate(fd, 0);
-        lseek(fd, 0, SEEK_SET);
-        ::write(fd, new_content.c_str(), new_content.size());
-
-        flock(fd, LOCK_UN);
-        ::close(fd);
-    }
-
-    // Check if backup is in progress for this index (lock-free atomic check)
-    // Throws std::runtime_error if backup is active
-    // Only rejects for backup-in-progress; normal write contention is handled by operation_mutex
-    void checkBackupInProgress(const CacheEntry& entry) const {
-        if (entry.backup_in_progress.load(std::memory_order_acquire)) {
-            throw std::runtime_error(
-                "Cannot modify index while backup is in progress. "
-                "Backup job ID: " + entry.active_backup_job_id + ". "
-                "Please wait for backup to complete or check status at /api/v1/backups/jobs"
-            );
-        }
+    std::string getUserBackupDir(const std::string& username) const {
+        return data_dir_ + "/backups/" + username;
     }
 
     void recoverBackupState() {
         std::string backup_dir = data_dir_ + "/backups";
+        if (!std::filesystem::exists(backup_dir)) return;
 
-        // Mark stale IN_PROGRESS jobs as FAILED
-        if (std::filesystem::exists(getJobsFilePath())) {
-            try {
-                modifyJobsFile([](std::unordered_map<std::string, BackupJob>& jobs) {
-                    for (auto& [id, job] : jobs) {
-                        if (job.status == BackupJobStatus::IN_PROGRESS) {
-                            job.status = BackupJobStatus::FAILED;
-                            job.error_message = "Server restarted during backup";
-                            job.completed_at = std::chrono::system_clock::now();
-                        }
-                    }
-                });
-            } catch (const std::exception& e) {
-                LOG_ERROR("Failed to load jobs.json: " << e.what());
-            }
-        }
-
-        // Remove temp tar files (.tmp_*.tar) left from failed backups
-        if (std::filesystem::exists(backup_dir)) {
-            try {
-                for (const auto& entry : std::filesystem::directory_iterator(backup_dir)) {
-                    if (entry.is_regular_file()) {
-                        std::string filename = entry.path().filename().string();
+        try {
+            // Clean .tmp_*.tar in each user subfolder
+            for (const auto& user_entry : std::filesystem::directory_iterator(backup_dir)) {
+                if (!user_entry.is_directory()) continue;
+                for (const auto& file : std::filesystem::directory_iterator(user_entry.path())) {
+                    if (file.is_regular_file()) {
+                        std::string filename = file.path().filename().string();
                         if (filename.starts_with(".tmp_") && filename.ends_with(".tar")) {
-                            LOG_INFO("Removing incomplete backup file: " << entry.path().string());
-                            std::filesystem::remove(entry.path());
+                            LOG_INFO("Removing incomplete backup: " << file.path().string());
+                            std::filesystem::remove(file.path());
                         }
                     }
                 }
-            } catch (const std::exception& e) {
-                LOG_ERROR("Failed to cleanup incomplete backups: " << e.what());
             }
+        } catch (const std::exception& e) {
+            LOG_ERROR("Failed to cleanup incomplete backups: " << e.what());
         }
     }
 
@@ -974,9 +771,9 @@ public:
     }
 
     // Backup methods
-    std::vector<std::string> listBackups() {
+    std::vector<std::string> listBackups(const std::string& username) {
         std::vector<std::string> backups;
-        std::string backup_dir = data_dir_ + "/backups";
+        std::string backup_dir = getUserBackupDir(username);
 
         if(!std::filesystem::exists(backup_dir)) {
             return backups;
@@ -998,19 +795,18 @@ public:
     }
 
     std::pair<bool, std::string> restoreBackup(const std::string& backup_name,
-                                               const std::string& target_index_name) {
+                                               const std::string& target_index_name,
+                                               const std::string& username) {
         // 1. Validate backup name
         std::pair<bool, std::string> result = validateBackupName(backup_name);
         if(!result.first) {
             return result;
         }
 
-        // Use default username for single-user system
-        std::string user_id = settings::DEFAULT_USERNAME;
-        std::string backup_dir_root = data_dir_ + "/backups";
+        std::string backup_dir_root = getUserBackupDir(username);
         std::string backup_tar = backup_dir_root + "/" + backup_name + ".tar";
         std::string backup_extract_dir = backup_dir_root + "/" + backup_name;
-        std::string target_index_id = user_id + "/" + target_index_name;
+        std::string target_index_id = username + "/" + target_index_name;
         std::string target_dir = data_dir_ + "/" + target_index_id;
 
         // 2. Validation - check for .tar file
@@ -1093,14 +889,15 @@ public:
         }
     }
 
-    std::pair<bool, std::string> deleteBackup(const std::string& backup_name) {
+    std::pair<bool, std::string> deleteBackup(const std::string& backup_name,
+                                               const std::string& username) {
         // Validate backup name
         std::pair<bool, std::string> result = validateBackupName(backup_name);
         if(!result.first) {
             return result;
         }
 
-        std::string backup_tar = data_dir_ + "/backups/" + backup_name + ".tar";
+        std::string backup_tar = getUserBackupDir(username) + "/" + backup_name + ".tar";
 
         if(std::filesystem::exists(backup_tar)) {
             std::filesystem::remove(backup_tar);
@@ -1120,57 +917,60 @@ public:
             return result;
         }
 
-        // 2. Check if backup file already exists
-        std::string backup_tar = data_dir_ + "/backups/" + backup_name + ".tar";
-        if(std::filesystem::exists(backup_tar)) {
+        // 2. Extract username from index_id
+        std::string username;
+        size_t pos = index_id.find('/');
+        if (pos != std::string::npos) {
+            username = index_id.substr(0, pos);
+        } else {
+            return {false, "Invalid index ID format"};
+        }
+
+        // 3. Check if user already has an active backup
+        if (active_user_backups_.count(username)) {
+            return {false, "Backup already in progress for user: " + username};
+        }
+
+        // 4. Check if backup file already exists on disk
+        std::string user_backup_dir = getUserBackupDir(username);
+        std::filesystem::create_directories(user_backup_dir);
+        std::string backup_tar = user_backup_dir + "/" + backup_name + ".tar";
+        if (std::filesystem::exists(backup_tar)) {
             return {false, "Backup already exists: " + backup_name};
         }
 
-        // 3. Generate unique job_id (timestamp + random 6 chars)
-        auto now = std::chrono::system_clock::now();
-        auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()).count();
-        std::string job_id = std::to_string(timestamp) + "_" +
-            random_generator::rand_alphanum(6);
-
-        // 4. Get entry and atomically set backup-in-progress flag
+        // 5. Track active backup and set entry state
         auto& entry = getIndexEntry(index_id);
+        active_user_backups_[username] = {index_id, backup_name};
+        entry.active_backup_job_id = backup_name;
 
-        // Reject if backup already running for this index (atomic CAS)
-        bool expected = false;
-        if (!entry.backup_in_progress.compare_exchange_strong(expected, true,
-                std::memory_order_acq_rel)) {
-            return {false, "Backup already in progress for this index"};
-        }
-        // Flag is now true - we own it, must clear on any failure path
-        entry.active_backup_job_id = job_id;
-
-        // 5. Create BackupJob record with IN_PROGRESS status
-        BackupJob job;
-        job.job_id = job_id;
-        job.index_id = index_id;
-        job.backup_name = backup_name;
-        job.status = BackupJobStatus::IN_PROGRESS;
-        job.started_at = now;
-        job.completed_at = std::chrono::system_clock::time_point();
-
-        modifyJobsFile([&](std::unordered_map<std::string, BackupJob>& jobs) {
-            jobs[job_id] = job;
-        });
-
-        // 6. Spawn detached thread calling executeBackupJob
-        std::thread([this, job_id, index_id, backup_name]() {
-            executeBackupJob(job_id, index_id, backup_name);
+        // 6. Spawn detached thread
+        std::thread([this, index_id, backup_name]() {
+            executeBackupJob(index_id, backup_name);
         }).detach();
 
-        LOG_INFO("Backup job started: " << job_id << " for index: " << index_id);
+        LOG_INFO("Backup started: " << backup_name << " for index: " << index_id);
 
-        // 6. Return job_id immediately
-        return {true, job_id};
+        return {true, backup_name};
     }
 
-    std::vector<BackupJob> getAllBackupJobs() {
-        return readJobsFile();
+    std::optional<ActiveBackup> getActiveBackup(const std::string& username) {
+        auto it = active_user_backups_.find(username);
+        if (it != active_user_backups_.end()) return it->second;
+        return std::nullopt;
+    }
+
+    nlohmann::json getBackupInfo(const std::string& backup_name, const std::string& username) {
+        std::string tar_path = getUserBackupDir(username) + "/" + backup_name + ".tar";
+        if (!std::filesystem::exists(tar_path)) return nlohmann::json();
+        std::string error_msg;
+        auto content = ndd::ArchiveUtils::readFileFromTar(tar_path, "metadata.json", error_msg);
+        if (!content) return nlohmann::json();
+        try {
+            return nlohmann::json::parse(*content);
+        } catch (...) {
+            return nlohmann::json();
+        }
     }
 
     bool createIndex(const std::string& index_id,
@@ -1464,9 +1264,6 @@ public:
         try {
             // Get the index entry (loads if needed, handles all locking)
             auto& entry = getIndexEntry(index_id);
-
-            // Check if backup is in progress (atomic, no lock)
-            checkBackupInProgress(entry);
 
             // Use per-index operation mutex to prevent concurrent operations
             std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
@@ -1805,9 +1602,6 @@ public:
         try {
             auto& entry = getIndexEntry(index_id);
 
-            // Check if backup is in progress (atomic, no lock)
-            checkBackupInProgress(entry);
-
             // Use per-index operation mutex to prevent concurrent operations
             std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
 
@@ -1841,9 +1635,6 @@ public:
                          const std::vector<std::pair<std::string, std::string>>& updates) {
         try {
             auto& entry = getIndexEntry(index_id);
-
-            // Check if backup is in progress (atomic, no lock)
-            checkBackupInProgress(entry);
 
             std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
 
@@ -1879,9 +1670,6 @@ public:
     bool deleteVector(const std::string& index_id, const std::string& str_id) {
         try {
             auto& entry = getIndexEntry(index_id);
-
-            // Check if backup is in progress (atomic, no lock)
-            checkBackupInProgress(entry);
 
             // Use per-index operation mutex to prevent concurrent operations
             std::lock_guard<std::mutex> operation_lock(entry.operation_mutex);
@@ -2227,15 +2015,6 @@ public:
     }
 
     bool deleteIndex(const std::string& index_id) {
-        // Check if backup is in progress (under read lock to access entry)
-        {
-            std::shared_lock<std::shared_mutex> read_lock(indices_mutex_);
-            auto it = indices_.find(index_id);
-            if (it != indices_.end()) {
-                checkBackupInProgress(it->second);
-            }
-        }
-
         std::unique_lock<std::shared_mutex> write_lock(indices_mutex_);
         // Remove from in-memory structures if loaded
         auto it = indices_.find(index_id);

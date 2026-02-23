@@ -1,6 +1,6 @@
 # Backup System
 
-Backups are stored as `.tar` archives in `{DATA_DIR}/backups/`. Job state is persisted to `jobs.json`.
+Backups are stored as `.tar` archives in per-user directories: `{DATA_DIR}/backups/{username}/`. Active backup state is tracked in-memory.
 
 ## API Endpoints
 
@@ -8,7 +8,8 @@ Backups are stored as `.tar` archives in `{DATA_DIR}/backups/`. Job state is per
 |--------|----------|-------------|
 | POST | `/api/v1/index/{name}/backup` | Create async backup |
 | GET | `/api/v1/backups` | List all backup files |
-| GET | `/api/v1/backups/jobs` | List all backup jobs with status |
+| GET | `/api/v1/backups/active` | Check active backup for current user |
+| GET | `/api/v1/backups/{name}/info` | Get backup metadata (read from .tar) |
 | POST | `/api/v1/backups/{name}/restore` | Restore backup to new index |
 | DELETE | `/api/v1/backups/{name}` | Delete a backup file |
 | GET | `/api/v1/backups/{name}/download` | Download backup (streaming) |
@@ -19,26 +20,23 @@ Backups are stored as `.tar` archives in `{DATA_DIR}/backups/`. Job state is per
 ## Concurrency Model
 
 ```
-backup_in_progress (atomic<bool>, per-index)   flock on jobs.json (file lock)
-├── Lock-free check for write operations        ├── Protects: jobs.json file
-├── Scope: single CacheEntry                    ├── Scope: all job updates
-├── Cost: ~1 ns (single CPU instruction)        └── LOCK_EX for writes, LOCK_SH for reads
-└── Set via compare_exchange_strong                  (thread-safe file access)
-
 operation_mutex (mutex, per-index)
 ├── Protects: index data during save + tar
 ├── Scope: single index
-└── Held for: seconds/minutes
+├── Held for: seconds/minutes (save + tar creation)
+└── Write operations block until mutex is available
 ```
 
-**Hybrid approach:** Atomic flag for write rejection (fast) + flock for job persistence (no in-memory map). Backup thread holds `operation_mutex` for minutes (save + tar). The atomic flag gives instant lock-free 409 rejection while job updates go directly to disk with flock.
+**Simple approach:** No atomic flags or file locks. The backup thread holds `operation_mutex` while saving and creating the tar. Write operations that arrive during backup simply block on the mutex until the backup releases it. One active backup per user is enforced via in-memory map.
 
-**Write path is lock-free for backup checks:**
+**Write path during backup:**
 
 ```
-Write:   atomic load backup_in_progress → lock operation_mutex → release
-Backup:  compare_exchange_strong(flag) → flock jobs.json + write → lock operation_mutex → release → clear flag → flock jobs.json + write
+Write:   lock operation_mutex → do the write → release
+Backup:  lock operation_mutex → save + tar → release
 ```
+
+If backup holds the mutex, writes block until it completes. Normal write-vs-write contention works the same way.
 
 ---
 
@@ -47,35 +45,30 @@ Backup:  compare_exchange_strong(flag) → flock jobs.json + write → lock oper
 ### Create Backup (Async)
 
 ```
-POST /index/X/backup → validateBackupName() → check no duplicate on disk
-→ generate job_id → compare_exchange_strong(backup_in_progress, false→true)
-→ [flock LOCK_EX] register job to jobs.json [unlock]
-→ spawn detached thread → return 202 { job_id }
+POST /index/X/backup → validateBackupName() → check no duplicate .tar on disk
+→ check active_user_backups_[username] empty (one per user)
+→ insert into active_user_backups_ map
+→ set entry.active_backup_job_id = backup_name
+→ spawn detached thread → return 202 { backup_name }
 ```
-
-`compare_exchange_strong` atomically rejects if another backup is already running for this index.
 
 **Background thread** (`executeBackupJob`):
 
 ```
-[flock LOCK_SH] verify job exists in jobs.json [unlock]
 → check disk space (need 2x index size) → read metadata
 → [LOCK operation_mutex] saveIndexInternal → write metadata.json → create .tmp_{name}.tar → cleanup metadata.json [UNLOCK operation_mutex]
-→ clear backup_in_progress flag (atomic store false)
 → rename .tmp_ → final tar (atomic)
-→ [flock LOCK_EX] mark COMPLETED in jobs.json [unlock]
+→ erase from active_user_backups_, clear entry.active_backup_job_id
 ```
 
-**On failure**: cleanup temp files → clear backup_in_progress flag → [flock LOCK_EX] mark job FAILED in jobs.json [unlock].
+**On failure**: cleanup temp files → erase from active_user_backups_ → clear entry.active_backup_job_id.
 
 ### Write During Backup
 
 ```
 addVectors/deleteVectors/updateFilters/deleteByFilter/deleteIndex
-→ checkBackupInProgress(): atomic load backup_in_progress (NO lock needed)
-→ if backup active: immediately throw 409 "Cannot modify index while backup is in progress"
-→ if no backup: [LOCK operation_mutex] do the write [UNLOCK] → 200 OK
-  (blocks normally if another write holds operation_mutex — same as before)
+→ [LOCK operation_mutex] do the write [UNLOCK] → 200 OK
+  (blocks if backup holds operation_mutex — resumes after backup completes)
 ```
 
 ### Restore Backup
@@ -106,18 +99,26 @@ POST /backups/upload (multipart)
 NOTE: Upload currently buffers entire file in RAM (Crow multipart parser limitation).
 ```
 
+### Get Backup Info
+
+```
+GET /backups/{name}/info
+→ locate {DATA_DIR}/backups/{username}/{name}.tar
+→ read metadata.json from inside .tar (via libarchive, no full extraction)
+→ return metadata JSON (original_index, timestamp, size_mb, params)
+```
+
 ---
 
 ## Safety Checks
 
 | # | Check | Where |
 |---|-------|-------|
-| 1 | **One backup per index** — `compare_exchange_strong` on atomic flag prevents duplicate backups per index | createBackupAsync |
-| 2 | **Write protection** — all write ops do lock-free atomic check, get instant 409 if backup active | addVectors, deleteVectors, updateFilters, deleteByFilter, deleteIndex |
+| 1 | **One backup per user** — `active_user_backups_` map rejects if user already has active backup | createBackupAsync |
+| 2 | **Write blocking** — writes block on `operation_mutex` until backup completes | addVectors, deleteVectors, updateFilters, deleteByFilter, deleteIndex |
 | 3 | **Name validation** — alphanumeric, underscores, hyphens only; max 200 chars | validateBackupName |
-| 4 | **Duplicate prevention** — checked at creation AND inside background thread | createBackupAsync, executeBackupJob, upload |
+| 4 | **Duplicate prevention** — checks if .tar file already exists on disk | createBackupAsync, upload |
 | 5 | **Disk space** — requires 2x index size available | executeBackupJob |
 | 6 | **Atomic tar** — writes to .tmp_ first, then renames | executeBackupJob |
-| 7 | **Crash recovery** — on startup: mark stale IN_PROGRESS as FAILED, delete .tmp_ files. Atomic flag resets to `false` on fresh `CacheEntry` creation | loadJobs, cleanupIncompleteBackups |
+| 7 | **Crash recovery** — on startup: delete `.tmp_*.tar` files in each user subfolder | recoverBackupState |
 | 8 | **Restore safety** — target must not exist, metadata must be valid, cleanup on failure | restoreBackup |
-| 9 | **Job persistence** — flock (LOCK_EX) on jobs.json for thread-safe read-modify-write on every status change | modifyJobsFile |

@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <optional>
 #include <filesystem>
 #include <fstream>
 #include <archive.h>
@@ -100,6 +101,55 @@ namespace ndd {
             archive_write_close(ext);
             archive_write_free(ext);
             return true;
+        }
+
+        // Read a single file from a tar archive into memory (no disk extraction)
+        static std::optional<std::string> readFileFromTar(
+                const std::filesystem::path& archive_path,
+                const std::string& target_filename,
+                std::string& error_msg) {
+            struct archive* a = archive_read_new();
+            struct archive_entry* entry;
+
+            archive_read_support_format_all(a);
+            archive_read_support_filter_all(a);
+
+            if (archive_read_open_filename(a, archive_path.string().c_str(), 10240) != ARCHIVE_OK) {
+                error_msg = archive_error_string(a);
+                archive_read_free(a);
+                return std::nullopt;
+            }
+
+            while (archive_read_next_header(a, &entry) == ARCHIVE_OK) {
+                std::string pathname = archive_entry_pathname(entry);
+                // Match by filename (last component of path)
+                std::filesystem::path p(pathname);
+                if (p.filename().string() == target_filename) {
+                    // Read this entry into memory
+                    std::string content;
+                    la_int64_t size = archive_entry_size(entry);
+                    if (size > 0) {
+                        content.resize(size);
+                        la_ssize_t bytes_read = archive_read_data(a, content.data(), size);
+                        if (bytes_read < 0) {
+                            error_msg = archive_error_string(a);
+                            archive_read_close(a);
+                            archive_read_free(a);
+                            return std::nullopt;
+                        }
+                        content.resize(bytes_read);
+                    }
+                    archive_read_close(a);
+                    archive_read_free(a);
+                    return content;
+                }
+                archive_read_data_skip(a);
+            }
+
+            archive_read_close(a);
+            archive_read_free(a);
+            error_msg = "File not found in archive: " + target_filename;
+            return std::nullopt;
         }
     };
 

@@ -415,9 +415,9 @@ int main(int argc, char** argv) {
                         return json_error(400, result.second);
                     }
 
-                    // Return 202 Accepted with job_id
+                    // Return 202 Accepted with backup_name as job_id
                     crow::json::wvalue response;
-                    response["job_id"] = result.second;
+                    response["backup_name"] = result.second;
                     response["status"] = "in_progress";
                     return crow::response(202, response.dump());
                 } catch(const std::exception& e) {
@@ -431,7 +431,7 @@ int main(int argc, char** argv) {
             .methods("GET"_method)([&index_manager, &app](const crow::request& req) {
                 auto& ctx = app.get_context<AuthMiddleware>(req);
                 try {
-                    auto backups = index_manager.listBackups();
+                    auto backups = index_manager.listBackups(ctx.username);
                     nlohmann::json result_json = backups;
                     crow::response res;
                     res.code = 200;
@@ -459,7 +459,7 @@ int main(int argc, char** argv) {
 
                 try {
                     std::pair<bool, std::string> result =
-                            index_manager.restoreBackup(backup_name, target_index_name);
+                            index_manager.restoreBackup(backup_name, target_index_name, ctx.username);
                     if(!result.first) {
                         return json_error(400, result.second);
                     }
@@ -476,7 +476,7 @@ int main(int argc, char** argv) {
                                                              const std::string& backup_name) {
                 auto& ctx = app.get_context<AuthMiddleware>(req);
                 try {
-                    std::pair<bool, std::string> result = index_manager.deleteBackup(backup_name);
+                    std::pair<bool, std::string> result = index_manager.deleteBackup(backup_name, ctx.username);
                     if(!result.first) {
                         return json_error(400, result.second);
                     }
@@ -499,7 +499,7 @@ int main(int argc, char** argv) {
                     }
 
                     std::string backup_file =
-                            settings::DATA_DIR + "/backups/" + backup_name + ".tar";
+                            settings::DATA_DIR + "/backups/" + settings::DEFAULT_USERNAME + "/" + backup_name + ".tar";
 
                     if(!std::filesystem::exists(backup_file)) {
                         return json_error(404, "Backup not found");
@@ -569,8 +569,9 @@ int main(int argc, char** argv) {
                     }
 
                     // Check if backup already exists
-                    std::string backup_path =
-                            settings::DATA_DIR + "/backups/" + backup_name + ".tar";
+                    std::string user_backup_dir = settings::DATA_DIR + "/backups/" + ctx.username;
+                    std::filesystem::create_directories(user_backup_dir);
+                    std::string backup_path = user_backup_dir + "/" + backup_name + ".tar";
                     if(std::filesystem::exists(backup_path)) {
                         return json_error(409,
                                           "Backup with name '" + backup_name + "' already exists");
@@ -596,50 +597,43 @@ int main(int argc, char** argv) {
                 }
             });
 
-    // List all backup jobs
-    CROW_ROUTE(app, "/api/v1/backups/jobs")
+    // Get active backup status for current user
+    CROW_ROUTE(app, "/api/v1/backups/active")
             .CROW_MIDDLEWARES(app, AuthMiddleware)
             .methods("GET"_method)([&index_manager, &app](const crow::request& req) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
                 try {
-                    auto jobs = index_manager.getAllBackupJobs();
-
-                    std::vector<crow::json::wvalue> jobs_list;
-
-                    for(const auto& job : jobs) {
-                        crow::json::wvalue job_obj;
-                        job_obj["job_id"] = job.job_id;
-                        job_obj["index_id"] = job.index_id;
-                        job_obj["backup_name"] = job.backup_name;
-
-                        // Convert status enum to string
-                        if(job.status == BackupJobStatus::IN_PROGRESS) {
-                            job_obj["status"] = "in_progress";
-                        } else if(job.status == BackupJobStatus::COMPLETED) {
-                            job_obj["status"] = "completed";
-                        } else if(job.status == BackupJobStatus::FAILED) {
-                            job_obj["status"] = "failed";
-                        }
-
-                        if(!job.error_message.empty()) {
-                            job_obj["error"] = job.error_message;
-                        }
-
-                        auto started_time_t = std::chrono::system_clock::to_time_t(job.started_at);
-                        job_obj["started_at"] = started_time_t;
-
-                        if(job.status != BackupJobStatus::IN_PROGRESS) {
-                            auto completed_time_t =
-                                    std::chrono::system_clock::to_time_t(job.completed_at);
-                            job_obj["completed_at"] = completed_time_t;
-                        }
-
-                        jobs_list.push_back(std::move(job_obj));
-                    }
-
+                    auto active = index_manager.getActiveBackup(ctx.username);
                     crow::json::wvalue response;
-                    response["jobs"] = std::move(jobs_list);
-
+                    if (active) {
+                        response["active"] = true;
+                        response["backup_name"] = active->backup_name;
+                        response["index_id"] = active->index_id;
+                    } else {
+                        response["active"] = false;
+                    }
                     return crow::response(200, response.dump());
+                } catch(const std::exception& e) {
+                    return json_error(500, e.what());
+                }
+            });
+
+    // Get backup info (reads metadata.json from inside .tar)
+    CROW_ROUTE(app, "/api/v1/backups/<string>/info")
+            .CROW_MIDDLEWARES(app, AuthMiddleware)
+            .methods("GET"_method)([&index_manager, &app](const crow::request& req,
+                                                          const std::string& backup_name) {
+                auto& ctx = app.get_context<AuthMiddleware>(req);
+                try {
+                    auto info = index_manager.getBackupInfo(backup_name, ctx.username);
+                    if (info.empty()) {
+                        return json_error(404, "Backup not found or metadata missing");
+                    }
+                    crow::response res;
+                    res.code = 200;
+                    res.set_header("Content-Type", "application/json");
+                    res.body = info.dump();
+                    return res;
                 } catch(const std::exception& e) {
                     return json_error(500, e.what());
                 }
