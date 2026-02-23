@@ -363,7 +363,7 @@ private:
 
         std::string index_dir = data_dir_ + "/" + entry.index_id;
         std::string vector_storage_dir = index_dir + "/vectors";
-        std::string index_path = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
+        std::string index_path = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx";
         std::string temp_path = index_path + ".tmp";
 
         entry.alg->saveIndex(temp_path);
@@ -512,11 +512,10 @@ public:
     // Reset the index file. It does not affect the LMDB or metadata.
     // This is used when the index is corrupted or needs to be reset.
     bool resetIndex(const std::string& index_id, const IndexConfig& config) {
-        std::cout << __func__ << std::endl;
         std::string base_path = data_dir_ + "/" + index_id;
         std::string vector_storage_dir = base_path + "/vectors";
-        std::string index_file = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
-        LOG_DEBUG(index_file);
+        std::string index_path = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx";
+        LOG_DEBUG(index_path);
         std::string recover_file = base_path + "/recover.txt";
         LOG_DEBUG(recover_file);
 
@@ -527,8 +526,8 @@ public:
         }
 
         // 2. Fail if index file already exists
-        if(std::filesystem::exists(index_file)) {
-            LOG_ERROR("Index file already exists: " << index_file);
+        if(std::filesystem::exists(index_path)) {
+            LOG_ERROR("Index file already exists: " << index_path);
             return false;
         }
 
@@ -544,7 +543,7 @@ public:
                                              settings::RANDOM_SEED,
                                              quant_level,
                                              config.checksum);
-        hnsw.saveIndex(index_file);
+        hnsw.saveIndex(index_path);
 
         // 4. Write recover.txt with "0:0"
         std::ofstream fout(recover_file);
@@ -830,7 +829,7 @@ public:
 
         // Check file system without lock
         std::string vector_storage_dir = index_dir + "/vectors";
-        std::string index_path = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
+        std::string index_path = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx";
         if(std::filesystem::exists(index_path)) {
             throw std::runtime_error("Index already exists");
         }
@@ -860,7 +859,7 @@ public:
         // Initialize Sparse Storage if needed
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage = nullptr;
         if(config.sparse_dim > 0) {
-            std::string sparse_storage_dir = index_dir + "/vectors/svectors_" + settings::DEFAULT_SUBINDEX;
+            std::string sparse_storage_dir = index_dir + "/sparse";
             sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage");
@@ -935,11 +934,11 @@ public:
     }
 
     void loadIndex(const std::string& index_id) {
-        std::cout << __func__ << std::endl;
         std::string index_dir = data_dir_ + "/" + index_id;
         std::string lmdb_dir = index_dir + "/ids";
         std::string vector_storage_dir = index_dir + "/vectors";
-        std::string index_path = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
+        std::string index_path = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx";
+
         if(!std::filesystem::exists(index_path) || !std::filesystem::exists(lmdb_dir)
            || !std::filesystem::exists(vector_storage_dir)) {
             throw std::runtime_error("Required files missing for index: " + index_id);
@@ -970,7 +969,7 @@ public:
         // Initialize Sparse Storage if sparse_dim > 0
         std::unique_ptr<ndd::SparseVectorStorage> sparse_storage;
         if(sparse_dim > 0) {
-            std::string sparse_storage_dir = index_dir + "/vectors/svectors_" + settings::DEFAULT_SUBINDEX;
+            std::string sparse_storage_dir = index_dir + "/sparse";
             sparse_storage = std::make_unique<ndd::SparseVectorStorage>(sparse_storage_dir);
             if(!sparse_storage->initialize()) {
                 throw std::runtime_error("Failed to initialize sparse storage for index: "
@@ -1059,7 +1058,6 @@ public:
 
     // Add this new function to reload just the algorithm part while preserving the CacheEntry
     void reloadIndex(const std::string& index_id) {
-        std::cout << __func__ << std::endl;
 
         auto it = indices_.find(index_id);
         if(it == indices_.end()) {
@@ -1070,7 +1068,7 @@ public:
 
         std::string index_dir = data_dir_ + "/" + entry.index_id;
         std::string vector_storage_dir = index_dir + "/vectors";
-        std::string index_path = vector_storage_dir + "/dvectors_"+ settings::DEFAULT_SUBINDEX + "/main.idx";
+        std::string index_path = vector_storage_dir + "/" + settings::DEFAULT_SUBINDEX + ".idx";
 
         // Create a new HNSW algorithm object from the saved file
         auto new_alg = std::make_unique<hnswlib::HierarchicalNSW<float>>(index_path, 0);
