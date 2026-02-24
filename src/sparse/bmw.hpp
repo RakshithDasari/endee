@@ -242,8 +242,11 @@ namespace ndd {
             return removeDocumentInternal(txn, doc_id, vec);
         }
 
-        // Search using BMW algorithm (DAAT)
-        std::vector<std::pair<ndd::idInt, float>> search(const SparseVector& query, size_t k, const ndd::RoaringBitmap* filter = nullptr) {
+        // Search using BMW algorithm (DAAT
+        std::vector<std::pair<ndd::idInt, float>> search(const SparseVector& query,
+                                                        size_t k,
+                                                        const ndd::RoaringBitmap* filter = nullptr)
+        {
             if(query.empty() || k == 0) {
                 return {};
             }
@@ -633,10 +636,31 @@ namespace ndd {
             return it - 1;
         }
 
+        /**
+         * The quantize and dequantize functions are there to reduce the memory
+         * and storage footprint of the sparse values (float 32 to int8).
+         * Now there are lot of static_casts to in these functions. These are just artifacts
+         * to keep uint8_t intact at its usage end.
+         * The function quantizes negative numbers between 0 and -127
+         * and positive number between 0 and 127.
+         * TODO: Later we should do the following:
+         * 1. Use a common quantization function across the code base
+         * 2. change the return type of quantize to int8_t instead of uint8_t
+         */
+        // Helper for uint8 quantization
+        static inline uint8_t quantize(float val, float max_val) {
+            if (max_val <= 1e-9f) return 0; // zero maps to 0 (as int8_t)
+            float scaled = (val / max_val) * 127.0f;
+            if (scaled > 127.0f) return static_cast<uint8_t>(static_cast<int8_t>(127));
+            if (scaled < -127.0f) return static_cast<uint8_t>(static_cast<int8_t>(-127));
+            return static_cast<uint8_t>(static_cast<int8_t>(scaled + (scaled >= 0 ? 0.5f : -0.5f)));
+        }
+
         // Helper to dequantize
         static inline float dequantize(uint8_t val, float max_val) {
-            return (static_cast<float>(val) * (1.0f / 255.0f)) * max_val;
+            return static_cast<float>(static_cast<int8_t>(val)) * (max_val / 127.0f);
         }
+
 
         // Helper struct for getReadOnlyBlock return value
         struct BlockView {
@@ -1510,18 +1534,6 @@ namespace ndd {
             return entries;
         }
 
-        // Helper for uint8 quantization
-        static inline uint8_t quantize(float val, float max_val) {
-            if(max_val <= 1e-9f) {
-                return 0;
-            }
-            float scaled = (val / max_val) * 255.0f;
-            if(scaled > 255.0f) {
-                return 255;
-            }
-            return static_cast<uint8_t>(scaled);
-        }
-
         bool saveBlock(MDBX_txn* txn,
                        uint32_t term_id,
                        ndd::idInt start_doc_id,
@@ -1592,7 +1604,7 @@ namespace ndd {
 #else
             size_t value_size = sizeof(uint8_t);
 #endif
-            size_t total_size = sizeof(BlockHeader) + n * diff_size + n * value_size;
+            size_t total_size = sizeof(BlockHeader) + (n * diff_size) + (n * value_size);
 
             std::vector<uint8_t> buffer(total_size);
 
