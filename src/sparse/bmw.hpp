@@ -639,26 +639,30 @@ namespace ndd {
         /**
          * The quantize and dequantize functions are there to reduce the memory
          * and storage footprint of the sparse values (float 32 to int8).
-         * Now there are lot of static_casts to in these functions. These are just artifacts
-         * to keep uint8_t intact at its usage end.
-         * The function quantizes negative numbers between 0 and -127
-         * and positive number between 0 and 127.
-         * TODO: Later we should do the following:
-         * 1. Use a common quantization function across the code base
-         * 2. change the return type of quantize to int8_t instead of uint8_t
          */
         // Helper for uint8 quantization
         static inline uint8_t quantize(float val, float max_val) {
-            if (max_val <= 1e-9f) return 0; // zero maps to 0 (as int8_t)
-            float scaled = (val / max_val) * 127.0f;
-            if (scaled > 127.0f) return static_cast<uint8_t>(static_cast<int8_t>(127));
-            if (scaled < -127.0f) return static_cast<uint8_t>(static_cast<int8_t>(-127));
-            return static_cast<uint8_t>(static_cast<int8_t>(scaled + (scaled >= 0 ? 0.5f : -0.5f)));
+            if(max_val <= 1e-9f) {
+                return 0;
+            }
+            float scaled = (val / max_val) * 255.0f;
+            if(scaled >= 255.0f) {
+                return 255;
+            }
+            if (scaled <= 0.0f)   return 0;
+
+            return static_cast<uint8_t>(scaled + 0.5f);
         }
 
-        // Helper to dequantize
         static inline float dequantize(uint8_t val, float max_val) {
-            return static_cast<float>(static_cast<int8_t>(val)) * (max_val / 127.0f);
+            // If max_val is near zero, the result is effectively zero
+            if (max_val <= 1e-9f) {
+                return 0.0f;
+            }
+
+            // Use a single multiplier to avoid multiple floating point ops
+            const float scale = max_val / 255.0f;
+            return static_cast<float>(val) * scale;
         }
 
 
