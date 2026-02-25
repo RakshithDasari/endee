@@ -90,6 +90,7 @@ namespace settings {
     const std::string DEFAULT_SERVER_TYPE = "OSS";
     const std::string DEFAULT_DATA_DIR = "/mnt/data";
     const std::string DEFAULT_SUBINDEX = "default";
+    constexpr size_t MAX_NR_SUBINDEX = 100; //Maximum number of subindexes
     constexpr size_t DEFAULT_MAX_ACTIVE_INDICES = 64;
     constexpr size_t DEFAULT_MAX_ELEMENTS = 100'000;
     constexpr size_t DEFAULT_MAX_ELEMENTS_INCREMENT = 100'000;
