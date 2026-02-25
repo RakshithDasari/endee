@@ -86,7 +86,7 @@ option(USE_AVX512 "Enable AVX512 (F, BW, VNNI, FP16)" OFF)
 option(USE_AVX2   "Enable AVX2 (FMA, F16C)" OFF)
 option(USE_SVE2   "Enable SVE2 (INT8/16, FP16)" OFF)
 option(USE_NEON   "Enable NEON (FP16, DotProd)" OFF)
-option(NDD_BMW_STORE_FLOAT_VALUES "Store raw float values in BMW index (no quantization)" OFF)
+option(NDD_BMW_STORE_FLOAT_VALUES "Store raw float 32 values in BMW index (no quantization)" OFF)
 
 # Check if any SIMD option is selected
 if(NOT USE_AVX512 AND NOT USE_AVX2 AND NOT USE_SVE2 AND NOT USE_NEON)
