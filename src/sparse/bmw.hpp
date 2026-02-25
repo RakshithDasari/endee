@@ -21,6 +21,7 @@
 #include <shared_mutex>
 #include <unordered_set>
 #include <limits>
+#include <cstdint>
 #include <cmath>
 #include "../core/types.hpp"
 
@@ -437,7 +438,7 @@ namespace ndd {
             }
 
             auto entries = loadBlock(txn, term_id, start_doc_id);
-            if(entries.size() <= MAX_BLOCK_SIZE) {
+            if(entries.size() <= settings::MAX_BMW_BLOCK_SIZE) {
                 return true;
             }
 
@@ -586,15 +587,17 @@ namespace ndd {
         /**
          * The quantize and dequantize functions are there to reduce the memory
          * and storage footprint of the sparse values (float 32 to int8).
+         *
+         * XXX: Here we are assuming that sparse vectors can never have -1 values.
          */
         // Helper for uint8 quantization
         static inline uint8_t quantize(float val, float max_val) {
-            if(max_val <= 1e-9f) {
+            if(max_val <= settings::NEAR_ZERO) {
                 return 0;
             }
-            float scaled = (val / max_val) * 255.0f;
-            if(scaled >= 255.0f) {
-                return 255;
+            float scaled = (val / max_val) * UINT8_MAX;
+            if(scaled >= UINT8_MAX) {
+                return UINT8_MAX;
             }
             if (scaled <= 0.0f)   return 0;
 
@@ -603,12 +606,12 @@ namespace ndd {
 
         static inline float dequantize(uint8_t val, float max_val) {
             // If max_val is near zero, the result is effectively zero
-            if (max_val <= 1e-9f) {
+            if (max_val <= settings::NEAR_ZERO) {
                 return 0.0f;
             }
 
             // Use a single multiplier to avoid multiple floating point ops
-            const float scale = max_val / 255.0f;
+            const float scale = max_val / UINT8_MAX;
             return static_cast<float>(val) * scale;
         }
 
@@ -933,7 +936,6 @@ namespace ndd {
         mutable std::shared_mutex mutex_;
 
         // Block management constants
-        static constexpr size_t MAX_BLOCK_SIZE = 128;
 
         // Optimized SIMD search for 16-bit diffs
         size_t findEntryIndexSIMD16(const uint16_t* doc_diffs,
@@ -1724,7 +1726,7 @@ namespace ndd {
             }
 
             // Check if block needs splitting
-            if(block_entries.size() > MAX_BLOCK_SIZE) {
+            if(block_entries.size() > settings::MAX_BMW_BLOCK_SIZE) {
                 BlockHeader header;
                 bool saved = saveBlock(txn, term_id, block_it->start_doc_id, block_entries, header);
                 if(!saved) {
