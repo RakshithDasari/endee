@@ -856,8 +856,8 @@ namespace ndd {
                 const auto& block_meta = (*blocks)[current_block_idx];
                 if(target_doc_id > block_meta.start_doc_id) {
                     ndd::idInt diff = target_doc_id - block_meta.start_doc_id;
-                    // If diff > 65535, we know it's not in this 16-bit block
-                    if(diff > 65535) {
+                    // If diff > UINT16_MAX, we know it's not in this 16-bit block
+                    if(diff > UINT16_MAX) {
                         current_entry_idx = block_data_size;
                     } else {
                         current_entry_idx = index->findEntryIndexSIMD16(
@@ -1469,7 +1469,7 @@ namespace ndd {
 #endif
             header.alignment_pad = 0;
 
-            if(max_diff < 65536) {
+            if(max_diff <= UINT16_MAX) {
                 header.diff_bits = 16;
             } else {
                 header.diff_bits = 32;
@@ -1671,13 +1671,13 @@ namespace ndd {
             // Find the appropriate block
             auto block_it = findBlockIterator(blocks, doc_id);
 
-            // Check if we need to split due to range (if > 65535, cannot fit in uint16 diff)
+            // Check if we need to split due to range (if > UINT16_MAX, cannot fit in uint16 diff)
             // This is a constraint for 16-bit blocks. If we enable mix, we don't strict need to
             // check unless we want to force 16-bit.
 
             bool force_new_block = false;
             if(block_it != blocks.end() && block_it->start_doc_id <= doc_id) {
-                if((doc_id - block_it->start_doc_id) >= 65536) {
+                if((doc_id - block_it->start_doc_id) > UINT16_MAX) {
                     force_new_block = true;
                 }
             }
