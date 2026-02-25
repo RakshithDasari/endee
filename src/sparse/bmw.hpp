@@ -588,7 +588,7 @@ namespace ndd {
          * The quantize and dequantize functions are there to reduce the memory
          * and storage footprint of the sparse values (float 32 to int8).
          *
-         * XXX: Here we are assuming that sparse vectors can never have -1 values.
+         * XXX: Here we are assuming that sparse vectors can never have -ve values.
          */
         // Helper for uint8 quantization
         static inline uint8_t quantize(float val, float max_val) {
