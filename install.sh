@@ -246,6 +246,7 @@ build_project() {
             log "Mode: Release"
             # No specific flags for release, strictly speaking, 
             # unless you want -DCMAKE_BUILD_TYPE=Release
+            cmake_args+=("-DNDD_BMW_STORE_FLOAT_VALUES=ON")
             ;;
         *)
             error "Unknown BUILD_MODE: $BUILD_MODE"

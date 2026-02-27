@@ -533,7 +533,8 @@ namespace ndd {
         size_t getVocabSize() const { return vocab_size_; }
 
     private:
-        static constexpr ndd::idInt GLOBAL_MAX_SENTINEL_DOC_ID = 0;
+        // static constexpr ndd::idInt GLOBAL_MAX_SENTINEL_DOC_ID = 0;
+        static constexpr ndd::idInt GLOBAL_MAX_SENTINEL_DOC_ID = std::numeric_limits<ndd::idInt>::max();
 
         static size_t firstRealBlockIndex(const std::vector<BlockIdx>& blocks) {
             if(!blocks.empty() && blocks.front().start_doc_id == GLOBAL_MAX_SENTINEL_DOC_ID) {
@@ -601,7 +602,9 @@ namespace ndd {
             }
             if (scaled <= 0.0f)   return 0;
 
-            return static_cast<uint8_t>(scaled + 0.5f);
+            uint8_t result = static_cast<uint8_t>(scaled + 0.5f);
+            // return result;
+            return result == 0 ? 1 : result;  // preserve live entries
         }
 
         static inline float dequantize(uint8_t val, float max_val) {
@@ -1398,14 +1401,16 @@ namespace ndd {
                     const float* val_ptr;
 
                     if(header->diff_bits == 16) {
-                        val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint16_t));
+                        // val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint16_t));
+                        val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint16_t) + header->alignment_pad);
                         const uint16_t* diffs = static_cast<const uint16_t*>(diff_ptr);
                         for(size_t i = 0; i < n; ++i) {
                             entries[i].doc_diff = diffs[i];
                             entries[i].value = val_ptr[i];
                         }
                     } else if(header->diff_bits == 32) {
-                        val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint32_t));
+                        // val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint32_t));
+                        val_ptr = reinterpret_cast<const float*>(ptr + n * sizeof(uint32_t) + header->alignment_pad);
                         const uint32_t* diffs = static_cast<const uint32_t*>(diff_ptr);
                         for(size_t i = 0; i < n; ++i) {
                             entries[i].doc_diff = diffs[i];
@@ -1481,7 +1486,15 @@ namespace ndd {
 #else
             size_t value_size = sizeof(uint8_t);
 #endif
-            size_t total_size = sizeof(BlockHeader) + (n * diff_size) + (n * value_size);
+            // size_t total_size = sizeof(BlockHeader) + (n * diff_size) + (n * value_size);
+            size_t offset = sizeof(BlockHeader) + (n * diff_size);
+            size_t pad = 0;
+#if defined(NDD_BMW_STORE_FLOAT_VALUES)
+            pad = (4 - (offset & 3)) & 3;
+            header.alignment_pad = static_cast<uint32_t>(pad);
+#endif //NDD_BMW_STORE_FLOAT_VALUES
+
+            size_t total_size = offset + pad + (n * value_size);
 
             std::vector<uint8_t> buffer(total_size);
 
@@ -1497,12 +1510,14 @@ namespace ndd {
                     diffs[i] = static_cast<uint16_t>(entries[i].doc_diff);
                 }
                 ptr += n * sizeof(uint16_t);
+                ptr += header.alignment_pad;
             } else if(header.diff_bits == 32) {
                 uint32_t* diffs = reinterpret_cast<uint32_t*>(ptr);
                 for(size_t i = 0; i < n; ++i) {
                     diffs[i] = static_cast<uint32_t>(entries[i].doc_diff);
                 }
                 ptr += n * sizeof(uint32_t);
+                ptr += header.alignment_pad;
             }
 
             // Copy values
@@ -1646,7 +1661,8 @@ namespace ndd {
                         static_cast<const uint8_t*>(data.iov_base) + sizeof(BlockHeader);
 
                 const void* doc_diffs = ptr;
-                const uint8_t* values = ptr + header->n * diff_size;
+                // const uint8_t* values = ptr + header->n * diff_size;
+                const uint8_t* values = ptr + header->n * diff_size + header->alignment_pad;
 
                 return {doc_diffs,
                         values,
