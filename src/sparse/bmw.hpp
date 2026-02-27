@@ -532,6 +532,234 @@ namespace ndd {
 
         size_t getVocabSize() const { return vocab_size_; }
 
+        /// Search using Qdrant's batched scoring algorithm with single-list pruning.
+        ///
+        /// Instead of DAAT pivot-based iteration (WAND), this:
+        ///   1. Processes doc IDs in contiguous batches of BATCH_SIZE
+        ///   2. Accumulates dot-product scores into a flat array per batch
+        ///   3. Prunes only the longest posting list using block-level suffix-max
+        ///
+        /// Trade-off vs BMW/WAND:
+        ///   - Simpler: no pivot selection, no iterator sorting
+        ///   - More cache-friendly: sequential writes to score buffer
+        ///   - Less aggressive pruning: only prunes one list, not all
+        std::vector<std::pair<ndd::idInt, float>>
+        searchBatched(const SparseVector& query,
+                    size_t k,
+                    const ndd::RoaringBitmap* filter = nullptr) {
+            if(query.empty() || k == 0) {
+                return {};
+            }
+
+            std::shared_lock<std::shared_mutex> lock(mutex_);
+
+            MDBX_txn* txn;
+            int rc = mdbx_txn_begin(env_, nullptr, MDBX_TXN_RDONLY, &txn);
+            if(rc != 0) {
+                LOG_ERROR("Failed to begin search transaction: " << mdbx_strerror(rc));
+                return {};
+            }
+
+            static constexpr size_t BATCH_SIZE = 10000;
+
+            // ── STEP 1: Initialize iterators ──
+
+            std::vector<BlockIterator> iterators_storage;
+            iterators_storage.reserve(query.indices.size());
+
+            bool use_pruning = true;
+
+            for(size_t i = 0; i < query.indices.size(); ++i) {
+                auto it = term_blocks_index_.find(query.indices[i]);
+                if(it != term_blocks_index_.end()) {
+                    iterators_storage.emplace_back(
+                            query.indices[i], query.values[i], &it->second, this, txn);
+
+                    // Negative query weights break the pruning upper-bound math
+                    if(query.values[i] < 0.0f) {
+                        use_pruning = false;
+                    }
+                }
+            }
+
+            // Build pointer array (non-exhausted iterators only)
+            std::vector<BlockIterator*> iters;
+            iters.reserve(iterators_storage.size());
+            for(auto& it : iterators_storage) {
+                if(it.current_doc_id != std::numeric_limits<ndd::idInt>::max()) {
+                    iters.push_back(&it);
+                }
+            }
+
+            if(iters.empty()) {
+                mdbx_txn_abort(txn);
+                return {};
+            }
+
+            // ── STEP 2: Prepare search state ──
+
+            std::priority_queue<BMWCandidate> top_results;  // min-heap (lowest score on top)
+            float threshold = 0.0f;
+            float best_min_score = -std::numeric_limits<float>::infinity();
+
+            // Reusable score buffer — allocated once, zeroed per batch
+            std::vector<float> scores_buf(BATCH_SIZE, 0.0f);
+
+            // Helper: find minimum doc_id across all active iterators
+            auto find_min_id = [&]() -> ndd::idInt {
+                ndd::idInt m = std::numeric_limits<ndd::idInt>::max();
+                for(auto* it : iters) {
+                    if(it->current_doc_id < m) {
+                        m = it->current_doc_id;
+                    }
+                }
+                return m;
+            };
+
+            ndd::idInt min_id = find_min_id();
+
+            // ── STEP 3: Main batch loop ──
+
+            while(min_id != std::numeric_limits<ndd::idInt>::max()) {
+
+                // Compute batch range
+                ndd::idInt batch_start = min_id;
+                ndd::idInt batch_end = batch_start + static_cast<ndd::idInt>(BATCH_SIZE) - 1;
+                if(batch_end < batch_start) {
+                    batch_end = std::numeric_limits<ndd::idInt>::max() - 1;  // overflow guard
+                }
+                size_t batch_len = static_cast<size_t>(batch_end - batch_start) + 1;
+
+                // Ensure buffer is large enough (should be BATCH_SIZE but guard anyway)
+                if(batch_len > scores_buf.size()) {
+                    scores_buf.resize(batch_len);
+                }
+
+                // Zero score buffer for this batch
+                std::memset(scores_buf.data(), 0, batch_len * sizeof(float));
+
+                // ── 3a: Accumulate dot-product scores ──
+                //
+                // For each posting list, walk all entries with doc_id in [batch_start, batch_end].
+                // Accumulate: scores[doc_id - batch_start] += stored_weight * query_weight
+                //
+                // This is the Qdrant "advance_batch" core loop.
+
+                for(auto* it : iters) {
+                    float qw = it->term_weight;
+                    it->for_each_till_id(batch_end, [&](ndd::idInt doc_id, float weight) {
+                        size_t local = static_cast<size_t>(doc_id - batch_start);
+                        scores_buf[local] += weight * qw;
+                    });
+                }
+
+                // ── 3b: Collect results from score buffer ──
+
+                for(size_t local = 0; local < batch_len; ++local) {
+                    float s = scores_buf[local];
+                    if(s == 0.0f || s <= threshold) {
+                        continue;
+                    }
+
+                    ndd::idInt real_id = batch_start + static_cast<ndd::idInt>(local);
+
+                    if(filter && !filter->contains(real_id)) {
+                        continue;
+                    }
+
+                    if(top_results.size() < k) {
+                        top_results.emplace(real_id, s);
+                        if(top_results.size() == k) {
+                            threshold = top_results.top().score;
+                        }
+                    } else if(s > threshold) {
+                        top_results.pop();
+                        top_results.emplace(real_id, s);
+                        threshold = top_results.top().score;
+                    }
+                }
+
+                // ── 3c: Remove exhausted iterators ──
+
+                iters.erase(std::remove_if(iters.begin(),
+                                            iters.end(),
+                                            [](const BlockIterator* it) {
+                                                return it->current_doc_id
+                                                    == std::numeric_limits<ndd::idInt>::max();
+                                            }),
+                            iters.end());
+
+                if(iters.empty()) {
+                    break;
+                }
+
+                // ── 3d: Single iterator shortcut ──
+                //
+                // When only one posting list remains, no accumulation is needed.
+                // Score each element directly: score = weight * query_weight.
+
+                if(iters.size() == 1) {
+                    auto* it = iters[0];
+                    float qw = it->term_weight;
+                    while(it->current_doc_id != std::numeric_limits<ndd::idInt>::max()) {
+                        float s = it->current_score * qw;
+                        ndd::idInt doc_id = it->current_doc_id;
+                        it->next();
+
+                        if(filter && !filter->contains(doc_id)) {
+                            continue;
+                        }
+                        if(top_results.size() < k) {
+                            top_results.emplace(doc_id, s);
+                            if(top_results.size() == k) {
+                                threshold = top_results.top().score;
+                            }
+                        } else if(s > threshold) {
+                            top_results.pop();
+                            top_results.emplace(doc_id, s);
+                            threshold = top_results.top().score;
+                        }
+                    }
+                    break;
+                }
+
+                // ── 3e: Find next batch start ──
+
+                min_id = find_min_id();
+
+                // ── 3f: Pruning ──
+                //
+                // If we have enough results, try to skip elements in the longest
+                // posting list that can't beat the current threshold.
+                // Only attempt if threshold improved since last prune (avoid wasted work).
+
+                if(use_pruning && top_results.size() >= k) {
+                    float new_min_score = threshold;
+                    if(new_min_score != best_min_score) {
+                        best_min_score = new_min_score;
+                        pruneLongest(iters, new_min_score);
+
+                        // Recompute min_id — pruning may have advanced an iterator
+                        min_id = find_min_id();
+                    }
+                }
+            }
+
+            // ── STEP 4: Extract and return results ──
+
+            mdbx_txn_abort(txn);
+
+            std::vector<std::pair<ndd::idInt, float>> results;
+            results.reserve(top_results.size());
+            while(!top_results.empty()) {
+                results.emplace_back(top_results.top().doc_id, top_results.top().score);
+                top_results.pop();
+            }
+            // Min-heap gives ascending order; reverse for descending
+            std::reverse(results.begin(), results.end());
+            return results;
+        }
+
     private:
         // static constexpr ndd::idInt GLOBAL_MAX_SENTINEL_DOC_ID = 0;
         static constexpr ndd::idInt GLOBAL_MAX_SENTINEL_DOC_ID = std::numeric_limits<ndd::idInt>::max();
@@ -648,6 +876,7 @@ namespace ndd {
             float current_score;
             BMWIndex* index;
             MDBX_txn* txn;
+            std::vector<float> suffix_block_max;  // suffix_block_max[i] = max(blocks[i..end].block_max_value)
 
             BlockIterator(uint32_t tid,
                             float weight,
@@ -680,6 +909,16 @@ namespace ndd {
                     if(current_block_idx < blocks->size()) {
                         loadCurrentBlock();
                     }
+                    {
+                        suffix_block_max.resize(blocks->size(), 0.0f);
+                        float running = 0.0f;
+                        for(size_t i = blocks->size(); i > first_block_idx; --i) {
+                           size_t idx = i - 1;
+                            running = std::max(running, (*blocks)[idx].block_max_value);
+                            suffix_block_max[idx] = running;
+                        }
+                    }
+
                 }
             }
 
@@ -927,6 +1166,88 @@ namespace ndd {
             }
 
             float globalUpperBound() const { return term_weight * global_term_max; }
+
+            // Upper bound on the weight of any element from current position to end of posting list.
+            /// Block-level approximation of Qdrant's per-element max_next_weight.
+            float maxRemainingWeight() const {
+                if(current_block_idx >= blocks->size()) {
+                    return 0.0f;
+                }
+                return suffix_block_max[current_block_idx];
+            }
+
+            /// Approximate remaining work (for finding longest iterator to prune).
+            size_t remainingBlocks() const {
+                if(current_block_idx >= blocks->size()) {
+                    return 0;
+                }
+                return blocks->size() - current_block_idx;
+            }
+
+            /// Iterate all live elements with doc_id <= target_id, calling f(doc_id, weight) for each.
+            /// After return, iterator is positioned at the first live element with doc_id > target_id
+            /// (or exhausted).
+            ///
+            /// This is the core batch-scoring primitive from Qdrant's algorithm.
+            /// Replaces the per-document advance/next pattern with a bulk scan.
+            template<typename F>
+            void for_each_till_id(ndd::idInt target_id, F&& f) {
+                // Fast exit: already past target or exhausted
+                if(current_doc_id > target_id) {
+                    return;
+                }
+                // current_doc_id == MAX is > any valid target_id, caught above
+
+                while(current_block_idx < blocks->size()) {
+                    const auto& bm = (*blocks)[current_block_idx];
+
+                    // If this block starts beyond target, all remaining entries are > target
+                    if(bm.start_doc_id > target_id) {
+                        // Iterator already positioned correctly by previous loadCurrentBlock
+                        return;
+                    }
+
+                    if(diff_bits == 16) {
+                        auto diffs = static_cast<const uint16_t*>(doc_diffs_ptr);
+                        // Tight inner loop: scan entries sequentially within block
+                        while(current_entry_idx < block_data_size) {
+                            ndd::idInt did = bm.start_doc_id + diffs[current_entry_idx];
+                            if(did > target_id) {
+                                // Reposition iterator state at this entry
+                                advanceToNextLive16();
+                                return;
+                            }
+                            if(isLiveAt(current_entry_idx)) {
+                                f(did, valueAt(current_entry_idx, bm.block_max_value));
+                            }
+                            current_entry_idx++;
+                        }
+                    } else {
+                        auto diffs = static_cast<const uint32_t*>(doc_diffs_ptr);
+                        while(current_entry_idx < block_data_size) {
+                            ndd::idInt did = bm.start_doc_id + diffs[current_entry_idx];
+                            if(did > target_id) {
+                                advanceToNextLive32();
+                                return;
+                            }
+                            if(isLiveAt(current_entry_idx)) {
+                                f(did, valueAt(current_entry_idx, bm.block_max_value));
+                            }
+                            current_entry_idx++;
+                        }
+                    }
+
+                    // Block exhausted, move to next
+                    current_block_idx++;
+                    if(current_block_idx < blocks->size()) {
+                        loadCurrentBlock();  // sets current_entry_idx=0, calls advanceToNextLive
+                    } else {
+                        current_doc_id = std::numeric_limits<ndd::idInt>::max();
+                        return;
+                    }
+                }
+                current_doc_id = std::numeric_limits<ndd::idInt>::max();
+            }
         };
 
         MDBX_env* env_;
@@ -1811,6 +2132,74 @@ namespace ndd {
 
             return false;
         }
-    };
 
+        /// Qdrant-style single-list pruning.
+        ///
+        /// Finds the longest posting list. If all its remaining elements up to the next
+        /// doc_id in other lists cannot beat min_score, skip them.
+        ///
+        /// Uses block-level suffix-max as the upper bound (conservative but correct).
+        void pruneLongest(std::vector<BlockIterator*>& iters, float min_score) {
+            if(iters.size() < 2) {
+                return;
+            }
+
+            // Find iterator with most remaining blocks (proxy for longest)
+            size_t longest_idx = 0;
+            size_t longest_rem = 0;
+            for(size_t i = 0; i < iters.size(); ++i) {
+                size_t rem = iters[i]->remainingBlocks();
+                if(rem > longest_rem) {
+                    longest_rem = rem;
+                    longest_idx = i;
+                }
+            }
+
+            // Swap longest to front
+            if(longest_idx != 0) {
+                std::swap(iters[0], iters[longest_idx]);
+            }
+
+            auto* longest = iters[0];
+            if(longest->current_doc_id == std::numeric_limits<ndd::idInt>::max()) {
+                return;
+            }
+
+            ndd::idInt longest_doc = longest->current_doc_id;
+
+            // Find minimum doc_id across all OTHER iterators
+            ndd::idInt others_min = std::numeric_limits<ndd::idInt>::max();
+            for(size_t i = 1; i < iters.size(); ++i) {
+                if(iters[i]->current_doc_id < others_min) {
+                    others_min = iters[i]->current_doc_id;
+                }
+            }
+
+            if(others_min <= longest_doc) {
+                // Can't prune:
+                //   == means this doc appears in multiple lists, must score fully
+                //   <  means other lists have earlier docs that need scoring first
+                return;
+            }
+
+            // All docs from longest_doc to others_min-1 appear ONLY in the longest list.
+            // Their max possible score = max_remaining_weight * query_weight.
+            // If that can't beat min_score, skip them all.
+
+            float max_weight = longest->maxRemainingWeight();
+            float max_possible = max_weight * longest->term_weight;
+
+            if(max_possible <= min_score) {
+                if(others_min == std::numeric_limits<ndd::idInt>::max()) {
+                    // All other iterators exhausted — skip entire remaining list
+                    longest->current_doc_id = std::numeric_limits<ndd::idInt>::max();
+                    longest->current_block_idx = longest->blocks->size();
+                } else {
+                    // Skip to the doc where other lists resume
+                    longest->advance(others_min);
+                }
+            }
+        }
+
+    };
 }  // namespace ndd

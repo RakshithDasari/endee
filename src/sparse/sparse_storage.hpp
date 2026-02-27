@@ -254,7 +254,8 @@ namespace ndd {
 
         // Search (delegates to BMW)
         std::vector<std::pair<ndd::idInt, float>> search(const SparseVector& query, size_t k, const ndd::RoaringBitmap* filter = nullptr) {
-            return bmw_index_->search(query, k, filter);
+            // return bmw_index_->search(query, k, filter);
+            return bmw_index_->searchBatched(query, k, filter);
         }
 
         // Statistics
